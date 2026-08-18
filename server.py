@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FINAL FIX: Multiple Sessions per PC, LauncherInstance removed, /health added
+FIXED LOGIC: Dashboard shows 4 items, Default Password is "asd", /health added
 """
 import hashlib
 import json
@@ -19,7 +19,9 @@ app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 CORS(app)
 
-ADMIN_PASSWORD = "admin123"
+# ================= কনফিগারেশন =================
+ADMIN_PASSWORD = "admin123"  # ড্যাশবোর্ড লগইন পাসওয়ার্ড
+DEFAULT_GLOBAL_PASSWORD = "asd"  # 🔥 সফটওয়্যার লগইন পাসওয়ার্ড (asd)
 
 # ================= হ্যাশ ফাংশন =================
 def hash_password(pwd: str) -> str:
@@ -64,8 +66,9 @@ def init_db():
 
     c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
     if not c.fetchone():
-        default_hash = hash_password("admin123")
+        default_hash = hash_password(DEFAULT_GLOBAL_PASSWORD)
         c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (default_hash,))
+        
     c.execute("SELECT value FROM settings WHERE key = 'dashboard_password'")
     if not c.fetchone():
         c.execute("INSERT INTO settings (key, value) VALUES ('dashboard_password', ?)", (hash_password(ADMIN_PASSWORD),))
@@ -100,12 +103,11 @@ def client_verify():
 
         pc_name = data.get('pc_name')
         hardware_id = data.get('hardware_id')
-        password = data.get('password')
+        password = data.get('password', '').strip()
 
         if not pc_name or not hardware_id or not password:
             return jsonify({"success": False, "message": "Missing required fields"}), 400
 
-        # LauncherInstance স্কিপ করা
         if pc_name == "LauncherInstance" and hardware_id == "LauncherOnlyID":
             return jsonify({"success": True, "message": "Launcher validated", "session_token": "launcher_dummy"}), 200
 
@@ -198,13 +200,11 @@ def admin_get_users():
 
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
-    # LauncherInstance বাদ দেওয়া
     c.execute('''
         SELECT 
             u.id, u.pc_name, u.location, u.is_active, u.activated_at, u.deactivated_at,
             (SELECT device_model FROM device_reports WHERE user_id = u.id ORDER BY reported_at DESC LIMIT 1) as device_model
         FROM users u
-        WHERE u.pc_name != 'LauncherInstance'
         ORDER BY u.id DESC
     ''')
     rows = c.fetchall()
@@ -281,7 +281,7 @@ def admin_get_history():
     history = [{"id": r[0], "pc_name": r[1], "action": r[2], "details": r[3], "timestamp": r[4]} for r in rows]
     return jsonify({"history": history}), 200
 
-# ================= 🛑 /health এন্ডপয়েন্ট =================
+# ================= 🔥 Software এর জন্য /health endpoint (গুরুত্বপূর্ণ) =================
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -289,7 +289,7 @@ def health_check():
         'timestamp': datetime.now(timezone.utc).isoformat(), 
         'server': socket.gethostname()
     })
-# =========================================================
+# ===============================================================================
 
 # ================= ড্যাশবোর্ড লগইন =================
 @app.route('/login', methods=['GET', 'POST'])
