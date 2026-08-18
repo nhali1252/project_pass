@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FIXED LOGIC: Dashboard shows 4 items, Default Password is "asd", /health added
+FINAL FIX: Default password set to "asdf"
 """
 import hashlib
 import json
@@ -20,17 +20,15 @@ app.secret_key = secrets.token_hex(32)
 CORS(app)
 
 # ================= কনফিগারেশন =================
-ADMIN_PASSWORD = "admin123"  # ড্যাশবোর্ড লগইন পাসওয়ার্ড
-DEFAULT_GLOBAL_PASSWORD = "asd"  # 🔥 সফটওয়্যার লগইন পাসওয়ার্ড (asd)
+ADMIN_PASSWORD = "admin123"
+DEFAULT_GLOBAL_PASSWORD = "asdf"  # 🔥 এখানে 'asdf' বসানো হয়েছে
 
-# ================= হ্যাশ ফাংশন =================
 def hash_password(pwd: str) -> str:
     return hashlib.sha256(pwd.encode()).hexdigest()
 
 def verify_password(input_pwd: str, stored_hash: str) -> bool:
     return hash_password(input_pwd) == stored_hash
 
-# ================= ডেটাবেস সেটআপ =================
 def init_db():
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
@@ -78,7 +76,6 @@ def init_db():
 
 init_db()
 
-# ================= অফলাইন ডিটেক্টর থ্রেড =================
 def mark_offline_users():
     while True:
         time.sleep(10)
@@ -94,7 +91,6 @@ def mark_offline_users():
 
 threading.Thread(target=mark_offline_users, daemon=True).start()
 
-# ================= ক্লায়েন্ট API =================
 @app.route('/api/client/verify', methods=['POST'])
 def client_verify():
     try:
@@ -192,7 +188,6 @@ def client_device_info():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ================= অ্যাডমিন API =================
 @app.route('/api/admin/users', methods=['GET'])
 def admin_get_users():
     if not session.get('dashboard_logged_in'):
@@ -281,7 +276,6 @@ def admin_get_history():
     history = [{"id": r[0], "pc_name": r[1], "action": r[2], "details": r[3], "timestamp": r[4]} for r in rows]
     return jsonify({"history": history}), 200
 
-# ================= 🔥 Software এর জন্য /health endpoint (গুরুত্বপূর্ণ) =================
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -289,9 +283,7 @@ def health_check():
         'timestamp': datetime.now(timezone.utc).isoformat(), 
         'server': socket.gethostname()
     })
-# ===============================================================================
 
-# ================= ড্যাশবোর্ড লগইন =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -320,7 +312,6 @@ def index():
         return redirect(url_for('login'))
     return render_template_string(DASHBOARD_HTML)
 
-# ================= এইচটিএমএল টেমপ্লেট =================
 LOGIN_PAGE = '''
 <!DOCTYPE html>
 <html>
