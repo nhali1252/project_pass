@@ -3,8 +3,6 @@
 ADB Commander - Master Control Panel
 Final Version:
 - No default global password (must be set via dashboard)
-- Password change revokes all active sessions
-- Includes /health endpoint
 """
 import hashlib
 import json
