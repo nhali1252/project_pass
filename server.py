@@ -158,19 +158,162 @@ def admin_set_password():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# =============== 🔥 THIS IS THE MISSING ENDPOINT ===============
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({
-        'status': 'healthy', 
-        'timestamp': datetime.now(timezone.utc).isoformat(), 
-        'server': socket.gethostname()
-    })
-# ================================================================
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
 
 @app.route('/')
 def index():
-    return render_template_string('''... (Your HTML Dashboard Code goes here - The one from previous messages) ...''')
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>ADB Commander - Control Panel</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+                font-family: sans-serif; background: #111827; color: #f9fafb;
+                padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh;
+            }
+            .container { max-width: 1000px; width: 100%; background: #1f2937; border-radius: 12px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+            .header { text-align: center; margin-bottom: 30px; }
+            .header h1 { font-size: 28px; color: #fff; }
+            .header h1 span { color: #64ffda; }
+            .card { background: #111827; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #374151; }
+            .card h3 { color: #64ffda; margin-bottom: 15px; }
+            .input-group { display: flex; gap: 10px; flex-wrap: wrap; }
+            input { padding: 10px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #fff; flex: 1; min-width: 200px; }
+            .btn { padding: 10px 20px; background: #22c55e; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+            .btn:hover { background: #16a34a; }
+            .btn-danger { background: #ef4444; }
+            .btn-danger:hover { background: #dc2626; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            th, td { border: 1px solid #374151; padding: 12px; text-align: left; }
+            th { background: #111827; color: #64ffda; }
+            .status-active { color: #22c55e; }
+            .status-inactive { color: #ef4444; }
+            .empty { text-align: center; color: #6b7280; padding: 20px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🔐 <span>ADB Commander</span> Control Panel</h1>
+                <p style="color: #9ca3af; font-size: 14px;">Manage global password & monitor users</p>
+            </div>
+
+            <div class="card">
+                <h3>🔑 Change Global Password</h3>
+                <p style="color: #9ca3af; font-size: 13px; margin-bottom: 10px;">এখানে নতুন পাসওয়ার্ড দিন। এই পাসওয়ার্ড দিয়ে সবাই সফটওয়্যার ওপেন করতে পারবে (যতক্ষণ না অ্যাডমিন পরিবর্তন করছেন)।</p>
+                <div class="input-group">
+                    <input type="password" id="newPwd" placeholder="Enter new password">
+                    <button class="btn" onclick="updatePassword()">Update Password</button>
+                </div>
+                <div id="msg" style="margin-top: 10px; font-size: 14px;"></div>
+            </div>
+
+            <div class="card">
+                <h3>👥 Connected Users</h3>
+                <div style="overflow-x: auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th><th>PC Name</th><th>Location</th><th>Status</th><th>Activated At</th><th>Deactivated At</th><th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="users-body"></tbody>
+                    </table>
+                </div>
+                <div id="loader" class="empty">Loading users...</div>
+            </div>
+        </div>
+
+        <script>
+            const API_BASE = '/api/admin';
+            const AUTH = 'Bearer admin123';
+
+            async function fetchUsers() {
+                document.getElementById('loader').style.display = 'block';
+                const r = await fetch(API_BASE + '/users', { headers: { 'Authorization': AUTH } });
+                if (!r.ok) { alert('Failed to fetch users'); document.getElementById('loader').style.display = 'none'; return; }
+                const data = await r.json();
+                document.getElementById('loader').style.display = 'none';
+                
+                const tbody = document.getElementById('users-body');
+                tbody.innerHTML = '';
+                
+                if(data.users.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="empty">No users registered yet.</td></tr>';
+                    return;
+                }
+
+                data.users.forEach(u => {
+                    const tr = document.createElement('tr');
+                    const statusHTML = u.is_active 
+                        ? `<span class="status-active">✅ Active</span>` 
+                        : `<span class="status-inactive">❌ Inactive</span>`;
+                    
+                    let actionHTML = '';
+                    if(u.is_active) {
+                        actionHTML = `<button class="btn btn-danger btn-sm" onclick="deactivateUser(${u.id})">Deactivate</button>`;
+                    } else {
+                        actionHTML = `<span style="color: #6b7280; font-size: 12px;">Deactivated</span>`;
+                    }
+
+                    tr.innerHTML = `
+                        <td>${u.id}</td>
+                        <td>${u.pc_name}</td>
+                        <td>${u.location}</td>
+                        <td>${statusHTML}</td>
+                        <td>${u.activated_at}</td>
+                        <td>${u.deactivated_at}</td>
+                        <td>${actionHTML}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            }
+
+            async function deactivateUser(id) {
+                if (!confirm('Are you sure you want to deactivate this user?')) return;
+                const r = await fetch(API_BASE + '/deactivate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': AUTH },
+                    body: JSON.stringify({ user_id: id })
+                });
+                if (r.ok) {
+                    alert('User deactivated successfully! The software on their PC will close immediately.');
+                    fetchUsers();
+                } else {
+                    alert('Failed to deactivate user.');
+                }
+            }
+
+            async function updatePassword() {
+                const pwd = document.getElementById('newPwd').value.trim();
+                if(!pwd || pwd.length < 4) {
+                    document.getElementById('msg').innerHTML = '<span style="color: #fca5a5;">Password must be at least 4 characters!</span>';
+                    return;
+                }
+                const r = await fetch(API_BASE + '/set_password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': AUTH },
+                    body: JSON.stringify({ new_password: pwd })
+                });
+                const data = await r.json();
+                if(r.ok) {
+                    document.getElementById('msg').innerHTML = `<span style="color: #86efac;">✅ ${data.message}</span>`;
+                    document.getElementById('newPwd').value = '';
+                } else {
+                    document.getElementById('msg').innerHTML = `<span style="color: #fca5a5;">❌ ${data.error}</span>`;
+                }
+            }
+
+            fetchUsers();
+        </script>
+    </body>
+    </html>
+    ''')
 
 if __name__ == '__main__':
     print("\n" + "=" * 70)
