@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FINAL FIX: Default password set to "asdf"
+FINAL FIX: Session reset on password change, default "asdf"
 """
 import hashlib
 import json
@@ -21,7 +21,7 @@ CORS(app)
 
 # ================= কনফিগারেশন =================
 ADMIN_PASSWORD = "admin123"
-DEFAULT_GLOBAL_PASSWORD = "asdf"  # 🔥 এখানে 'asdf' বসানো হয়েছে
+DEFAULT_GLOBAL_PASSWORD = "asdf"  
 
 def hash_password(pwd: str) -> str:
     return hashlib.sha256(pwd.encode()).hexdigest()
@@ -248,13 +248,25 @@ def admin_set_password():
         new_password = data.get('new_password')
         if not new_password or len(new_password) < 4:
             return jsonify({"error": "Password must be at least 4 characters"}), 400
+        
+        now = datetime.now(timezone.utc).isoformat()
         hashed = hash_password(new_password)
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
+        
+        # 🔥 ১. পাসওয়ার্ড হ্যাশ আপডেট করা
         c.execute("UPDATE settings SET value = ? WHERE key = 'global_password_hash'", (hashed,))
+        
+        # 🔥 ২. পুরানো সব সেশন টোকেন রিসেট করে অফলাইন করা (যাতে নতুন পাসওয়ার্ড লাগে)
+        c.execute("UPDATE users SET session_token = NULL, last_seen = NULL, is_active = 0, deactivated_at = ? WHERE is_active = 1", (now,))
+        
+        # 🔥 ৩. ইতিহাসে লগ করা
+        c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", 
+                  (0, "GLOBAL_PASSWORD_CHANGE", f"New global password set by admin", now))
+        
         conn.commit()
         conn.close()
-        return jsonify({"success": True, "message": "Global password updated successfully"}), 200
+        return jsonify({"success": True, "message": "Global password updated successfully. All active clients are now offline and must re-login."}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
