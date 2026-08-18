@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-Complete System with Global Password & Remote Deactivation
+Admin Panel with Login, Device Model, Offline Detection, History Logging
 """
 import hashlib
 import json
@@ -12,17 +12,19 @@ import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
 from flask_cors import CORS
 
 app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)  # সেশন এনক্রিপশনের জন্য
 CORS(app)
 
-ADMIN_PASSWORD = "admin123"
+ADMIN_PASSWORD = "admin123"  # ড্যাশবোর্ডের ডিফল্ট পাসওয়ার্ড (পরিবর্তন করতে পারেন)
 
 def init_db():
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
+    # ইউজার টেবিল
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         pc_name TEXT NOT NULL,
@@ -31,13 +33,40 @@ def init_db():
         is_active INTEGER DEFAULT 0,
         activated_at TEXT,
         deactivated_at TEXT,
-        session_token TEXT UNIQUE
+        session_token TEXT UNIQUE,
+        last_seen TEXT
     )''')
+    # সেটিংস টেবিল (গ্লোবাল পাসওয়ার্ড + ড্যাশবোর্ড পাসওয়ার্ড)
     c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+    # ডিভাইস রিপোর্ট টেবিল (এখন device_model যুক্ত)
+    c.execute('''CREATE TABLE IF NOT EXISTS device_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        serial TEXT NOT NULL,
+        state TEXT,
+        device_model TEXT,
+        reported_at TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )''')
+    # ইতিহাস টেবিল (লগ)
+    c.execute('''CREATE TABLE IF NOT EXISTS user_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        action TEXT,
+        details TEXT,
+        timestamp TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )''')
+
+    # ডিফল্ট পাসওয়ার্ড সেট করা (যদি না থাকে)
     c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
     if not c.fetchone():
         default_hash = hashlib.sha256("admin123".encode()).hexdigest()
         c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (default_hash,))
+    c.execute("SELECT value FROM settings WHERE key = 'dashboard_password'")
+    if not c.fetchone():
+        c.execute("INSERT INTO settings (key, value) VALUES ('dashboard_password', ?)", (hash_password(ADMIN_PASSWORD),))
+
     conn.commit()
     conn.close()
 
@@ -49,6 +78,24 @@ def hash_password(pwd: str) -> str:
 def verify_password(input_pwd: str, stored_hash: str) -> bool:
     return hash_password(input_pwd) == stored_hash
 
+# ================= অফলাইন ডিটেক্টর (ব্যাকগ্রাউন্ড থ্রেড) =================
+def mark_offline_users():
+    """যাদের ৩০ সেকেন্ড ধরে লাস্ট সিন দেখা যায়নি তাদের ইনঅ্যাক্টিভ করবে"""
+    while True:
+        time.sleep(10)
+        try:
+            conn = sqlite3.connect('licenses.db')
+            c = conn.cursor()
+            cutoff = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+            c.execute("UPDATE users SET is_active = 0, deactivated_at = ? WHERE is_active = 1 AND last_seen < ?", (datetime.now(timezone.utc).isoformat(), cutoff))
+            conn.commit()
+            conn.close()
+        except:
+            pass
+
+threading.Thread(target=mark_offline_users, daemon=True).start()
+
+# ================= ক্লায়েন্ট API =================
 @app.route('/api/client/verify', methods=['POST'])
 def client_verify():
     try:
@@ -74,22 +121,34 @@ def client_verify():
 
         now = datetime.now(timezone.utc).isoformat()
         token = secrets.token_urlsafe(32)
-        
+        last_seen = now
+
         c.execute("SELECT id, is_active FROM users WHERE hardware_id = ?", (hardware_id,))
         user = c.fetchone()
 
         if user:
             user_id, is_active = user
             if is_active == 1:
+                # আপডেট লাস্ট সিন
+                c.execute("UPDATE users SET last_seen = ? WHERE id = ?", (last_seen, user_id))
+                conn.commit()
                 conn.close()
                 return jsonify({"success": True, "message": "Software is already active", "session_token": token})
             else:
-                c.execute("UPDATE users SET is_active = 1, activated_at = ?, deactivated_at = NULL, session_token = ? WHERE id = ?", (now, token, user_id))
-                conn.commit(); conn.close()
+                # রিঅ্যাক্টিভেট
+                c.execute("UPDATE users SET is_active = 1, activated_at = ?, deactivated_at = NULL, session_token = ?, last_seen = ? WHERE id = ?", (now, token, last_seen, user_id))
+                # হিস্টরি লগ
+                c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", (user_id, "REACTIVATE", f"PC: {pc_name}", now))
+                conn.commit()
+                conn.close()
                 return jsonify({"success": True, "message": "Reactivated successfully", "session_token": token})
         else:
-            c.execute("INSERT INTO users (pc_name, hardware_id, is_active, activated_at, session_token) VALUES (?, ?, 1, ?, ?)", (pc_name, hardware_id, now, token))
-            conn.commit(); conn.close()
+            # নতুন ইউজার
+            c.execute("INSERT INTO users (pc_name, hardware_id, is_active, activated_at, session_token, last_seen) VALUES (?, ?, 1, ?, ?, ?)", (pc_name, hardware_id, now, token, last_seen))
+            user_id = c.lastrowid
+            c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", (user_id, "ACTIVATE", f"New PC: {pc_name}", now))
+            conn.commit()
+            conn.close()
             return jsonify({"success": True, "message": "New user activated", "session_token": token})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -105,218 +164,375 @@ def client_status():
         c = conn.cursor()
         c.execute("SELECT is_active FROM users WHERE session_token = ?", (token,))
         result = c.fetchone()
-        conn.close()
+        if not result:
+            conn.close()
+            return jsonify({"active": False, "message": "Invalid session"}), 200
 
-        if not result: return jsonify({"active": False, "message": "Invalid session"}), 200
+        now = datetime.now(timezone.utc).isoformat()
+        c.execute("UPDATE users SET last_seen = ? WHERE session_token = ?", (now, token))
+        conn.commit()
+        conn.close()
         return jsonify({"active": bool(result[0])}), 200
     except Exception as e:
         return jsonify({"active": False, "message": str(e)}), 500
 
+@app.route('/api/client/device_info', methods=['POST'])
+def client_device_info():
+    try:
+        data = request.get_json()
+        token = data.get('session_token')
+        devices = data.get('devices', [])
+
+        if not token: return jsonify({"error": "Missing token"}), 400
+
+        conn = sqlite3.connect('licenses.db')
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE session_token = ?", (token,))
+        user = c.fetchone()
+        if not user:
+            conn.close()
+            return jsonify({"error": "Invalid session"}), 401
+
+        user_id = user[0]
+
+        # পুরাতন রিপোর্ট মুছে নতুন ডেটা সেভ
+        c.execute("DELETE FROM device_reports WHERE user_id = ?", (user_id,))
+        now = datetime.now(timezone.utc).isoformat()
+        for dev in devices:
+            c.execute("INSERT INTO device_reports (user_id, serial, state, device_model, reported_at) VALUES (?, ?, ?, ?, ?)",
+                      (user_id, dev.get("serial", "Unknown"), dev.get("state", "Unknown"), dev.get("model", "Unknown"), now))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "message": "Devices info updated"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ================= অ্যাডমিন API =================
 @app.route('/api/admin/users', methods=['GET'])
 def admin_get_users():
-    auth = request.headers.get("Authorization")
-    if auth != f"Bearer {ADMIN_PASSWORD}": return jsonify({"error": "Unauthorized"}), 401
+    if not session.get('dashboard_logged_in'):
+        return jsonify({"error": "Unauthorized"}), 401
+
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
-    c.execute("SELECT id, pc_name, location, is_active, activated_at, deactivated_at FROM users ORDER BY id DESC")
+    # ইউজার লিস্ট (সর্বশেষ ডিভাইস মডেল সহ)
+    c.execute('''
+        SELECT 
+            u.id, u.pc_name, u.location, u.is_active, u.activated_at, u.deactivated_at,
+            (SELECT device_model FROM device_reports WHERE user_id = u.id ORDER BY reported_at DESC LIMIT 1) as device_model
+        FROM users u
+        ORDER BY u.id DESC
+    ''')
     rows = c.fetchall()
     conn.close()
-    users = [{"id": r[0], "pc_name": r[1], "location": r[2] or "-", "is_active": bool(r[3]), "activated_at": r[4] or "-", "deactivated_at": r[5] or "-"} for r in rows]
+
+    users = []
+    for row in rows:
+        users.append({
+            "id": row[0],
+            "pc_name": row[1],
+            "location": row[2] or "-",
+            "is_active": bool(row[3]),
+            "activated_at": row[4] or "-",
+            "deactivated_at": row[5] or "-",
+            "device_model": row[6] or "Unknown"
+        })
     return jsonify({"users": users}), 200
 
 @app.route('/api/admin/deactivate', methods=['POST'])
 def admin_deactivate():
-    auth = request.headers.get("Authorization")
-    if auth != f"Bearer {ADMIN_PASSWORD}": return jsonify({"error": "Unauthorized"}), 401
+    if not session.get('dashboard_logged_in'):
+        return jsonify({"error": "Unauthorized"}), 401
     try:
         data = request.get_json()
         user_id = data.get('user_id')
         if not user_id: return jsonify({"error": "User ID required"}), 400
+
         now = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
         c.execute("UPDATE users SET is_active = 0, deactivated_at = ? WHERE id = ?", (now, user_id))
-        conn.commit(); conn.close()
+        c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", (user_id, "DEACTIVATE", "Admin manually deactivated", now))
+        conn.commit()
+        conn.close()
         return jsonify({"success": True, "message": "User deactivated successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/set_password', methods=['POST'])
 def admin_set_password():
-    auth = request.headers.get("Authorization")
-    if auth != f"Bearer {ADMIN_PASSWORD}": return jsonify({"error": "Unauthorized"}), 401
+    if not session.get('dashboard_logged_in'):
+        return jsonify({"error": "Unauthorized"}), 401
     try:
         data = request.get_json()
         new_password = data.get('new_password')
-        if not new_password or len(new_password) < 4: return jsonify({"error": "Password must be at least 4 characters"}), 400
+        if not new_password or len(new_password) < 4:
+            return jsonify({"error": "Password must be at least 4 characters"}), 400
         hashed = hash_password(new_password)
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
         c.execute("UPDATE settings SET value = ? WHERE key = 'global_password_hash'", (hashed,))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         return jsonify({"success": True, "message": "Global password updated successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
+@app.route('/api/admin/history', methods=['GET'])
+def admin_get_history():
+    if not session.get('dashboard_logged_in'):
+        return jsonify({"error": "Unauthorized"}), 401
+    conn = sqlite3.connect('licenses.db')
+    c = conn.cursor()
+    c.execute('''
+        SELECT h.id, u.pc_name, h.action, h.details, h.timestamp
+        FROM user_history h
+        JOIN users u ON h.user_id = u.id
+        ORDER BY h.timestamp DESC
+        LIMIT 50
+    ''')
+    rows = c.fetchall()
+    conn.close()
+    history = [{"id": r[0], "pc_name": r[1], "action": r[2], "details": r[3], "timestamp": r[4]} for r in rows]
+    return jsonify({"history": history}), 200
 
+# ================= ড্যাশবোর্ড লগইন =================
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        password = request.form.get('password')
+        conn = sqlite3.connect('licenses.db')
+        c = conn.cursor()
+        c.execute("SELECT value FROM settings WHERE key = 'dashboard_password'")
+        result = c.fetchone()
+        stored_hash = result[0] if result else ""
+        conn.close()
+        if verify_password(password, stored_hash):
+            session['dashboard_logged_in'] = True
+            return redirect(url_for('index'))
+        else:
+            return render_template_string(LOGIN_PAGE, error="Invalid password")
+    return render_template_string(LOGIN_PAGE, error=None)
+
+@app.route('/logout')
+def logout():
+    session.pop('dashboard_logged_in', None)
+    return redirect(url_for('login'))
+
+# ================= ড্যাশবোর্ড (প্রটেক্টেড) =================
 @app.route('/')
 def index():
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>ADB Commander - Control Panel</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { 
-                font-family: sans-serif; background: #111827; color: #f9fafb;
-                padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh;
-            }
-            .container { max-width: 1000px; width: 100%; background: #1f2937; border-radius: 12px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-            .header { text-align: center; margin-bottom: 30px; }
-            .header h1 { font-size: 28px; color: #fff; }
-            .header h1 span { color: #64ffda; }
-            .card { background: #111827; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #374151; }
-            .card h3 { color: #64ffda; margin-bottom: 15px; }
-            .input-group { display: flex; gap: 10px; flex-wrap: wrap; }
-            input { padding: 10px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #fff; flex: 1; min-width: 200px; }
-            .btn { padding: 10px 20px; background: #22c55e; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
-            .btn:hover { background: #16a34a; }
-            .btn-danger { background: #ef4444; }
-            .btn-danger:hover { background: #dc2626; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-            th, td { border: 1px solid #374151; padding: 12px; text-align: left; }
-            th { background: #111827; color: #64ffda; }
-            .status-active { color: #22c55e; }
-            .status-inactive { color: #ef4444; }
-            .empty { text-align: center; color: #6b7280; padding: 20px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>🔐 <span>ADB Commander</span> Control Panel</h1>
-                <p style="color: #9ca3af; font-size: 14px;">Manage global password & monitor users</p>
-            </div>
+    if not session.get('dashboard_logged_in'):
+        return redirect(url_for('login'))
+    return render_template_string(DASHBOARD_HTML)
 
-            <div class="card">
-                <h3>🔑 Change Global Password</h3>
-                <p style="color: #9ca3af; font-size: 13px; margin-bottom: 10px;">এখানে নতুন পাসওয়ার্ড দিন। এই পাসওয়ার্ড দিয়ে সবাই সফটওয়্যার ওপেন করতে পারবে (যতক্ষণ না অ্যাডমিন পরিবর্তন করছেন)।</p>
-                <div class="input-group">
-                    <input type="password" id="newPwd" placeholder="Enter new password">
-                    <button class="btn" onclick="updatePassword()">Update Password</button>
-                </div>
-                <div id="msg" style="margin-top: 10px; font-size: 14px;"></div>
-            </div>
+# ================= এইচটিএমএল টেমপ্লেট =================
+LOGIN_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head><title>Admin Panel Login</title>
+<style>
+body { font-family: sans-serif; background: #111827; color: #f9fafb; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+.login-box { background: #1f2937; padding: 40px; border-radius: 12px; width: 300px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); text-align: center; }
+h2 { color: #64ffda; margin-bottom: 20px; }
+input { width: 100%; padding: 12px; margin: 10px 0; background: #111827; border: 1px solid #374151; border-radius: 6px; color: #fff; }
+button { width: 100%; padding: 12px; background: #22c55e; border: none; border-radius: 6px; color: #fff; font-weight: bold; cursor: pointer; }
+button:hover { background: #16a34a; }
+.error { color: #fca5a5; margin-top: 10px; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="login-box">
+<h2>🔐 Admin Panel</h2>
+<form method="post">
+<input type="password" name="password" placeholder="Enter Dashboard Password" required>
+<button type="submit">Login</button>
+</form>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+</div>
+</body>
+</html>
+'''
 
-            <div class="card">
-                <h3>👥 Connected Users</h3>
-                <div style="overflow-x: auto;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>ID</th><th>PC Name</th><th>Location</th><th>Status</th><th>Activated At</th><th>Deactivated At</th><th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="users-body"></tbody>
-                    </table>
-                </div>
-                <div id="loader" class="empty">Loading users...</div>
-            </div>
-        </div>
+DASHBOARD_HTML = '''
+<!DOCTYPE html>
+<html>
+<head>
+<title>Admin Panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: sans-serif; background: #111827; color: #f9fafb; padding: 20px; }
+.container { max-width: 1200px; margin: 0 auto; background: #1f2937; border-radius: 12px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+.header { text-align: center; margin-bottom: 30px; }
+.header h1 { font-size: 28px; color: #fff; }
+.header h1 span { color: #64ffda; }
+.card { background: #111827; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #374151; }
+.card h3 { color: #64ffda; margin-bottom: 15px; }
+.input-group { display: flex; gap: 10px; flex-wrap: wrap; }
+input { padding: 10px; background: #1f2937; border: 1px solid #374151; border-radius: 6px; color: #fff; flex: 1; min-width: 200px; }
+.btn { padding: 10px 20px; background: #22c55e; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+.btn:hover { background: #16a34a; }
+.btn-danger { background: #ef4444; }
+.btn-danger:hover { background: #dc2626; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+th, td { border: 1px solid #374151; padding: 12px; text-align: left; }
+th { background: #111827; color: #64ffda; }
+.status-active { color: #22c55e; }
+.status-inactive { color: #ef4444; }
+.empty { text-align: center; color: #6b7280; padding: 20px; }
+.tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+.tab-btn { padding: 8px 16px; background: #374151; border: none; color: #fff; cursor: pointer; border-radius: 6px; }
+.tab-btn.active { background: #64ffda; color: #111827; }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header">
+<h1>🔐 <span>Admin Panel</span></h1>
+<p style="color: #9ca3af;">Manage global password, users, devices & history</p>
+<a href="/logout" style="color: #fca5a5; float: right; text-decoration: none;">Logout</a>
+</div>
 
-        <script>
-            const API_BASE = '/api/admin';
-            const AUTH = 'Bearer admin123';
+<div class="tabs">
+<button class="tab-btn active" onclick="switchTab('users')">👤 Users & Devices</button>
+<button class="tab-btn" onclick="switchTab('history')">📜 History</button>
+</div>
 
-            async function fetchUsers() {
-                document.getElementById('loader').style.display = 'block';
-                const r = await fetch(API_BASE + '/users', { headers: { 'Authorization': AUTH } });
-                if (!r.ok) { alert('Failed to fetch users'); document.getElementById('loader').style.display = 'none'; return; }
-                const data = await r.json();
-                document.getElementById('loader').style.display = 'none';
-                
-                const tbody = document.getElementById('users-body');
-                tbody.innerHTML = '';
-                
-                if(data.users.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" class="empty">No users registered yet.</td></tr>';
-                    return;
-                }
+<div id="tab-users">
+<div class="card">
+<h3>🔑 Change Global Password</h3>
+<div class="input-group">
+<input type="password" id="newPwd" placeholder="Enter new global password">
+<button class="btn" onclick="updatePassword()">Update Password</button>
+</div>
+<div id="msg" style="margin-top: 10px; font-size: 14px;"></div>
+</div>
 
-                data.users.forEach(u => {
-                    const tr = document.createElement('tr');
-                    const statusHTML = u.is_active 
-                        ? `<span class="status-active">✅ Active</span>` 
-                        : `<span class="status-inactive">❌ Inactive</span>`;
-                    
-                    let actionHTML = '';
-                    if(u.is_active) {
-                        actionHTML = `<button class="btn btn-danger btn-sm" onclick="deactivateUser(${u.id})">Deactivate</button>`;
-                    } else {
-                        actionHTML = `<span style="color: #6b7280; font-size: 12px;">Deactivated</span>`;
-                    }
+<div class="card">
+<h3>👥 Connected Users & Devices</h3>
+<div style="overflow-x: auto;">
+<table>
+<thead>
+<tr>
+<th>ID</th><th>PC Name</th><th>Device Model</th><th>Location</th><th>Status</th><th>Activated At</th><th>Deactivated At</th><th>Action</th>
+</tr>
+</thead>
+<tbody id="users-body"></tbody>
+</table>
+</div>
+<div id="loader" class="empty">Loading...</div>
+</div>
+</div>
 
-                    tr.innerHTML = `
-                        <td>${u.id}</td>
-                        <td>${u.pc_name}</td>
-                        <td>${u.location}</td>
-                        <td>${statusHTML}</td>
-                        <td>${u.activated_at}</td>
-                        <td>${u.deactivated_at}</td>
-                        <td>${actionHTML}</td>
-                    `;
-                    tbody.appendChild(tr);
-                });
-            }
+<div id="tab-history" class="hidden">
+<div class="card">
+<h3>📜 User History</h3>
+<div style="overflow-x: auto;">
+<table>
+<thead>
+<tr><th>ID</th><th>PC Name</th><th>Action</th><th>Details</th><th>Timestamp</th></tr>
+</thead>
+<tbody id="history-body"></tbody>
+</table>
+</div>
+</div>
+</div>
+</div>
 
-            async function deactivateUser(id) {
-                if (!confirm('Are you sure you want to deactivate this user?')) return;
-                const r = await fetch(API_BASE + '/deactivate', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': AUTH },
-                    body: JSON.stringify({ user_id: id })
-                });
-                if (r.ok) {
-                    alert('User deactivated successfully! The software on their PC will close immediately.');
-                    fetchUsers();
-                } else {
-                    alert('Failed to deactivate user.');
-                }
-            }
+<script>
+let AUTH = 'logged_in'; // session cookie handles auth
 
-            async function updatePassword() {
-                const pwd = document.getElementById('newPwd').value.trim();
-                if(!pwd || pwd.length < 4) {
-                    document.getElementById('msg').innerHTML = '<span style="color: #fca5a5;">Password must be at least 4 characters!</span>';
-                    return;
-                }
-                const r = await fetch(API_BASE + '/set_password', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': AUTH },
-                    body: JSON.stringify({ new_password: pwd })
-                });
-                const data = await r.json();
-                if(r.ok) {
-                    document.getElementById('msg').innerHTML = `<span style="color: #86efac;">✅ ${data.message}</span>`;
-                    document.getElementById('newPwd').value = '';
-                } else {
-                    document.getElementById('msg').innerHTML = `<span style="color: #fca5a5;">❌ ${data.error}</span>`;
-                }
-            }
+function switchTab(tab) {
+document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+document.querySelectorAll('.tabs + * .hidden').forEach(e => e.classList.add('hidden'));
+document.getElementById('tab-' + tab).classList.remove('hidden');
+event.target.classList.add('active');
+}
 
-            fetchUsers();
-        </script>
-    </body>
-    </html>
-    ''')
+async function fetchUsers() {
+const r = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer dummy' } }); // session handles auth
+if (!r.ok) { location.href = '/login'; return; }
+const data = await r.json();
+const tbody = document.getElementById('users-body');
+tbody.innerHTML = '';
+if(data.users.length === 0) {
+tbody.innerHTML = '<tr><td colspan="8" class="empty">No users registered yet.</td></tr>';
+return;
+}
+data.users.forEach(u => {
+const tr = document.createElement('tr');
+const statusHTML = u.is_active ? `<span class="status-active">✅ Active</span>` : `<span class="status-inactive">❌ Inactive</span>`;
+let actionHTML = u.is_active ? `<button class="btn btn-danger btn-sm" onclick="deactivateUser(${u.id})">Deactivate</button>` : `<span style="color: #6b7280;">Deactivated</span>`;
+tr.innerHTML = `
+<td>${u.id}</td>
+<td>${u.pc_name}</td>
+<td>${u.device_model}</td>
+<td>${u.location}</td>
+<td>${statusHTML}</td>
+<td>${u.activated_at}</td>
+<td>${u.deactivated_at}</td>
+<td>${actionHTML}</td>
+`;
+tbody.appendChild(tr);
+});
+}
+
+async function deactivateUser(id) {
+if (!confirm('Deactivate this user? The software will close immediately.')) return;
+const r = await fetch('/api/admin/deactivate', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ user_id: id })
+});
+if (r.ok) { alert('User deactivated.'); fetchUsers(); fetchHistory(); } else { alert('Failed.'); }
+}
+
+async function updatePassword() {
+const pwd = document.getElementById('newPwd').value.trim();
+if (!pwd || pwd.length < 4) {
+document.getElementById('msg').innerHTML = '<span style="color: #fca5a5;">Minimum 4 characters!</span>';
+return;
+}
+const r = await fetch('/api/admin/set_password', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ new_password: pwd })
+});
+const data = await r.json();
+if (r.ok) {
+document.getElementById('msg').innerHTML = `<span style="color: #86efac;">✅ ${data.message}</span>`;
+document.getElementById('newPwd').value = '';
+} else {
+document.getElementById('msg').innerHTML = `<span style="color: #fca5a5;">❌ ${data.error}</span>`;
+}
+}
+
+async function fetchHistory() {
+const r = await fetch('/api/admin/history');
+if (!r.ok) { return; }
+const data = await r.json();
+const tbody = document.getElementById('history-body');
+tbody.innerHTML = '';
+data.history.forEach(h => {
+const tr = document.createElement('tr');
+tr.innerHTML = `<td>${h.id}</td><td>${h.pc_name}</td><td>${h.action}</td><td>${h.details}</td><td>${h.timestamp}</td>`;
+tbody.appendChild(tr);
+});
+}
+
+// লোড এবং অটো রিফ্রেশ
+fetchUsers();
+fetchHistory();
+setInterval(() => { fetchUsers(); fetchHistory(); }, 5000);
+</script>
+</body>
+</html>
+'''
 
 if __name__ == '__main__':
     print("\n" + "=" * 70)
-    print("  🔐 ADB COMMANDER MASTER CONTROL PANEL - RUNNING")
+    print("  🔐 ADMIN PANEL - RUNNING")
     print("=" * 70)
     app.run(host='0.0.0.0', port=5000, debug=False)
