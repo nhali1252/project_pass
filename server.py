@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FIXED: Added /health endpoint
+FIXED: Removes LauncherInstance, Allows Multiple Instances per PC
 """
 import hashlib
 import json
@@ -19,8 +19,7 @@ app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 CORS(app)
 
-# ================= কনফিগারেশন =================
-ADMIN_PASSWORD = "admin123"  # Dashboard Login
+ADMIN_PASSWORD = "admin123"
 
 # ================= হ্যাশ ফাংশন =================
 def hash_password(pwd: str) -> str:
@@ -33,10 +32,11 @@ def verify_password(input_pwd: str, stored_hash: str) -> bool:
 def init_db():
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
+    # ইউজার টেবিল (UNIQUE কনস্ট্রেইন্ট সরানো হয়েছে যাতে একাধিক রো তৈরি হতে পারে)
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         pc_name TEXT NOT NULL,
-        hardware_id TEXT UNIQUE NOT NULL,
+        hardware_id TEXT NOT NULL,
         location TEXT,
         is_active INTEGER DEFAULT 0,
         activated_at TEXT,
@@ -63,12 +63,11 @@ def init_db():
         FOREIGN KEY(user_id) REFERENCES users(id)
     )''')
 
-    # ডিফল্ট গ্লোবাল ও ড্যাশবোর্ড পাসওয়ার্ড সেট করা
+    # ডিফল্ট পাসওয়ার্ড সেট করা
     c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
     if not c.fetchone():
         default_hash = hash_password("admin123")
         c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (default_hash,))
-        
     c.execute("SELECT value FROM settings WHERE key = 'dashboard_password'")
     if not c.fetchone():
         c.execute("INSERT INTO settings (key, value) VALUES ('dashboard_password', ?)", (hash_password(ADMIN_PASSWORD),))
@@ -108,6 +107,10 @@ def client_verify():
         if not pc_name or not hardware_id or not password:
             return jsonify({"success": False, "message": "Missing required fields"}), 400
 
+        # LauncherInstance স্কিপ করা (ড্যাশবোর্ডে আসবে না)
+        if pc_name == "LauncherInstance" and hardware_id == "LauncherOnlyID":
+            return jsonify({"success": True, "message": "Launcher validated", "session_token": "launcher_dummy"}), 200
+
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
         c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
@@ -122,29 +125,17 @@ def client_verify():
         token = secrets.token_urlsafe(32)
         last_seen = now
 
-        c.execute("SELECT id, is_active FROM users WHERE hardware_id = ?", (hardware_id,))
-        user = c.fetchone()
-
-        if user:
-            user_id, is_active = user
-            if is_active == 1:
-                c.execute("UPDATE users SET last_seen = ? WHERE id = ?", (last_seen, user_id))
-                conn.commit()
-                conn.close()
-                return jsonify({"success": True, "message": "Software is already active", "session_token": token})
-            else:
-                c.execute("UPDATE users SET is_active = 1, activated_at = ?, deactivated_at = NULL, session_token = ?, last_seen = ? WHERE id = ?", (now, token, last_seen, user_id))
-                c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", (user_id, "REACTIVATE", f"PC: {pc_name}", now))
-                conn.commit()
-                conn.close()
-                return jsonify({"success": True, "message": "Reactivated successfully", "session_token": token})
-        else:
-            c.execute("INSERT INTO users (pc_name, hardware_id, is_active, activated_at, session_token, last_seen) VALUES (?, ?, 1, ?, ?, ?)", (pc_name, hardware_id, now, token, last_seen))
-            user_id = c.lastrowid
-            c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", (user_id, "ACTIVATE", f"New PC: {pc_name}", now))
-            conn.commit()
-            conn.close()
-            return jsonify({"success": True, "message": "New user activated", "session_token": token})
+        # 🔥 লজিক পরিবর্তন: আগের রো খোঁজা হয় না, সবসময় নতুন রো তৈরি হয় (একাধিক সেশনের জন্য)
+        c.execute("INSERT INTO users (pc_name, hardware_id, is_active, activated_at, session_token, last_seen) VALUES (?, ?, 1, ?, ?, ?)", 
+                  (pc_name, hardware_id, now, token, last_seen))
+        user_id = c.lastrowid
+        
+        c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", 
+                  (user_id, "ACTIVATE", f"New Instance: {pc_name}", now))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "message": "New instance activated", "session_token": token})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -154,6 +145,7 @@ def client_status():
         data = request.get_json()
         token = data.get('session_token')
         if not token: return jsonify({"error": "Missing token"}), 400
+        if token == "launcher_dummy": return jsonify({"active": True}), 200
 
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
@@ -179,6 +171,7 @@ def client_device_info():
         devices = data.get('devices', [])
 
         if not token: return jsonify({"error": "Missing token"}), 400
+        if token == "launcher_dummy": return jsonify({"success": True}), 200
 
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
@@ -208,11 +201,13 @@ def admin_get_users():
 
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
+    # 🔥 ফিক্স: LauncherInstance ডাটাবেস থেকে রিমুভ করে বাকি সেশনগুলো দেখানো
     c.execute('''
         SELECT 
             u.id, u.pc_name, u.location, u.is_active, u.activated_at, u.deactivated_at,
             (SELECT device_model FROM device_reports WHERE user_id = u.id ORDER BY reported_at DESC LIMIT 1) as device_model
         FROM users u
+        WHERE u.pc_name != 'LauncherInstance'
         ORDER BY u.id DESC
     ''')
     rows = c.fetchall()
@@ -243,11 +238,13 @@ def admin_deactivate():
         now = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
+        # 🔥 ফিক্স: শুধুমাত্র ওই নির্দিষ্ট রো/আইডি-কেই ডিএক্টিভেট করা হবে (একই পিসির অন্য সেশনগুলো অক্ষুণ্ণ থাকবে)
         c.execute("UPDATE users SET is_active = 0, deactivated_at = ? WHERE id = ?", (now, user_id))
-        c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", (user_id, "DEACTIVATE", "Admin manually deactivated", now))
+        c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", 
+                  (user_id, "DEACTIVATE", f"Admin deactivated instance {user_id}", now))
         conn.commit()
         conn.close()
-        return jsonify({"success": True, "message": "User deactivated successfully"}), 200
+        return jsonify({"success": True, "message": "Instance deactivated successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -288,16 +285,6 @@ def admin_get_history():
     history = [{"id": r[0], "pc_name": r[1], "action": r[2], "details": r[3], "timestamp": r[4]} for r in rows]
     return jsonify({"history": history}), 200
 
-# ================= 🛑 এখানে `/health` এন্ডপয়েন্ট যুক্ত করা হলো =================
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        'status': 'healthy', 
-        'timestamp': datetime.now(timezone.utc).isoformat(), 
-        'server': socket.gethostname()
-    })
-# ==============================================================================
-
 # ================= ড্যাশবোর্ড লগইন =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -321,14 +308,12 @@ def logout():
     session.pop('dashboard_logged_in', None)
     return redirect(url_for('login'))
 
-# ================= ড্যাশবোর্ড (প্রটেক্টেড) =================
 @app.route('/')
 def index():
     if not session.get('dashboard_logged_in'):
         return redirect(url_for('login'))
     return render_template_string(DASHBOARD_HTML)
 
-# ================= এইচটিএমএল টেমপ্লেট =================
 LOGIN_PAGE = '''
 <!DOCTYPE html>
 <html>
@@ -444,7 +429,7 @@ th { background: #111827; color: #64ffda; }
 </div>
 
 <script>
-let AUTH = 'logged_in'; // session cookie handles auth
+let AUTH = 'logged_in';
 
 function switchTab(tab) {
 document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -454,7 +439,7 @@ event.target.classList.add('active');
 }
 
 async function fetchUsers() {
-const r = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer dummy' } });
+const r = await fetch('/api/admin/users');
 if (!r.ok) { location.href = '/login'; return; }
 const data = await r.json();
 const tbody = document.getElementById('users-body');
@@ -482,13 +467,13 @@ tbody.appendChild(tr);
 }
 
 async function deactivateUser(id) {
-if (!confirm('Deactivate this user? The software will close immediately.')) return;
+if (!confirm('Deactivate this instance? Other instances on this PC will stay active.')) return;
 const r = await fetch('/api/admin/deactivate', {
 method: 'POST',
 headers: { 'Content-Type': 'application/json' },
 body: JSON.stringify({ user_id: id })
 });
-if (r.ok) { alert('User deactivated.'); fetchUsers(); fetchHistory(); } else { alert('Failed.'); }
+if (r.ok) { alert('Instance deactivated.'); fetchUsers(); fetchHistory(); } else { alert('Failed.'); }
 }
 
 async function updatePassword() {
