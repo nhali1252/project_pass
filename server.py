@@ -522,3 +522,13 @@ if __name__ == '__main__':
     print("  🔐 ADMIN PANEL - RUNNING")
     print("=" * 70)
     app.run(host='0.0.0.0', port=5000, debug=False)
+
+# ================= 🛑 এখানে `/health` এন্ডপয়েন্ট যুক্ত করা হলো =================
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        'status': 'healthy', 
+        'timestamp': datetime.now(timezone.utc).isoformat(), 
+        'server': socket.gethostname()
+    })
+# ==============================================================================
