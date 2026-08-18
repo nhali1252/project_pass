@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Remote Admin Control Panel
-Designed to run on Google Cloud Shell
+Designed to run on Linux VMs
 Exposed via Cloudflare Zero Trust Tunnel
 """
 import hashlib
 import json
 import base64
 import secrets
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone  # <-- CHANGED for Python 3.9 compatibility
 import os
 import sqlite3
 import socket
@@ -47,7 +47,7 @@ def cleanup_expired_otps():
         try:
             conn = sqlite3.connect('licenses.db')
             c = conn.cursor()
-            now = datetime.now(UTC).isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             c.execute('UPDATE otp_codes SET is_active = 0 WHERE expiry < ? AND is_active = 1', (now,))
             conn.commit()
             conn.close()
@@ -63,7 +63,7 @@ cleanup_thread.start()
 def index():
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
 
     # Pending OTPs
     c.execute('''SELECT otp, pc_name, created, is_used, is_verified, duration, expiry
@@ -462,9 +462,9 @@ def generate_otp():
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
         c.execute('DELETE FROM otp_codes WHERE is_active = 0')
-        expiry = (datetime.now(UTC) + timedelta(minutes=duration)).isoformat()
+        expiry = (datetime.now(timezone.utc) + timedelta(minutes=duration)).isoformat()
         c.execute('''INSERT INTO otp_codes (otp, pc_name, duration, created, expiry) VALUES (?, ?, ?, ?, ?)''',
-                  (otp, pc_name, duration, datetime.now(UTC).isoformat(), expiry))
+                  (otp, pc_name, duration, datetime.now(timezone.utc).isoformat(), expiry))
         conn.commit()
         conn.close()
         return jsonify({'status': 'success', 'otp': otp, 'pc_name': pc_name, 'duration': duration})
@@ -487,7 +487,7 @@ def verify_otp():
         if not is_active: return jsonify({'error': 'OTP inactive!'}), 401
         if is_used: return jsonify({'error': 'OTP already used!'}), 401
         if is_verified: return jsonify({'error': 'OTP already verified!'}), 401
-        if datetime.now(UTC) > datetime.fromisoformat(expiry):
+        if datetime.now(timezone.utc) > datetime.fromisoformat(expiry):
             c.execute('UPDATE otp_codes SET is_active = 0 WHERE otp = ?', (otp,))
             conn.commit(); conn.close()
             return jsonify({'error': 'OTP expired!'}), 401
@@ -512,7 +512,7 @@ def check_otp():
         _, is_verified, is_used, expiry, is_active, duration = result
         if not is_active: return jsonify({'error': 'OTP inactive!'}), 401
         if is_used: return jsonify({'error': 'OTP already used!'}), 401
-        if datetime.now(UTC) > datetime.fromisoformat(expiry):
+        if datetime.now(timezone.utc) > datetime.fromisoformat(expiry):
             c.execute('UPDATE otp_codes SET is_active = 0 WHERE otp = ?', (otp,))
             conn.commit(); conn.close()
             return jsonify({'error': 'OTP expired!'}), 401
@@ -548,7 +548,7 @@ def clear_all():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now(UTC).isoformat(), 'server': socket.gethostname()})
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
 
 if __name__ == '__main__':
     print("\n" + "=" * 70)
