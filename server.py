@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FIXED: Hash function placement
+FIXED: Added /health endpoint
 """
 import hashlib
 import json
@@ -22,7 +22,7 @@ CORS(app)
 # ================= কনফিগারেশন =================
 ADMIN_PASSWORD = "admin123"  # Dashboard Login
 
-# ================= হ্যাশ ফাংশন (সবচেয়ে উপরে রাখা) =================
+# ================= হ্যাশ ফাংশন =================
 def hash_password(pwd: str) -> str:
     return hashlib.sha256(pwd.encode()).hexdigest()
 
@@ -33,7 +33,6 @@ def verify_password(input_pwd: str, stored_hash: str) -> bool:
 def init_db():
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
-    # ইউজার টেবিল
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         pc_name TEXT NOT NULL,
@@ -45,9 +44,7 @@ def init_db():
         session_token TEXT UNIQUE,
         last_seen TEXT
     )''')
-    # সেটিংস টেবিল
     c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-    # ডিভাইস রিপোর্ট টেবিল
     c.execute('''CREATE TABLE IF NOT EXISTS device_reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -57,7 +54,6 @@ def init_db():
         reported_at TEXT,
         FOREIGN KEY(user_id) REFERENCES users(id)
     )''')
-    # ইতিহাস টেবিল
     c.execute('''CREATE TABLE IF NOT EXISTS user_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -80,7 +76,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()  # ডেটাবেস সেটআপ রান করা
+init_db()
 
 # ================= অফলাইন ডিটেক্টর থ্রেড =================
 def mark_offline_users():
@@ -291,6 +287,16 @@ def admin_get_history():
     conn.close()
     history = [{"id": r[0], "pc_name": r[1], "action": r[2], "details": r[3], "timestamp": r[4]} for r in rows]
     return jsonify({"history": history}), 200
+
+# ================= 🛑 এখানে `/health` এন্ডপয়েন্ট যুক্ত করা হলো =================
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        'status': 'healthy', 
+        'timestamp': datetime.now(timezone.utc).isoformat(), 
+        'server': socket.gethostname()
+    })
+# ==============================================================================
 
 # ================= ড্যাশবোর্ড লগইন =================
 @app.route('/login', methods=['GET', 'POST'])
