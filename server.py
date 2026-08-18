@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-Admin Panel with Login, Device Model, Offline Detection, History Logging
+FIXED: Hash function placement
 """
 import hashlib
 import json
@@ -16,11 +16,20 @@ from flask import Flask, request, jsonify, render_template_string, redirect, url
 from flask_cors import CORS
 
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(32)  # সেশন এনক্রিপশনের জন্য
+app.secret_key = secrets.token_hex(32)
 CORS(app)
 
-ADMIN_PASSWORD = "admin123"  # ড্যাশবোর্ডের ডিফল্ট পাসওয়ার্ড (পরিবর্তন করতে পারেন)
+# ================= কনফিগারেশন =================
+ADMIN_PASSWORD = "admin123"  # Dashboard Login
 
+# ================= হ্যাশ ফাংশন (সবচেয়ে উপরে রাখা) =================
+def hash_password(pwd: str) -> str:
+    return hashlib.sha256(pwd.encode()).hexdigest()
+
+def verify_password(input_pwd: str, stored_hash: str) -> bool:
+    return hash_password(input_pwd) == stored_hash
+
+# ================= ডেটাবেস সেটআপ =================
 def init_db():
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
@@ -36,9 +45,9 @@ def init_db():
         session_token TEXT UNIQUE,
         last_seen TEXT
     )''')
-    # সেটিংস টেবিল (গ্লোবাল পাসওয়ার্ড + ড্যাশবোর্ড পাসওয়ার্ড)
+    # সেটিংস টেবিল
     c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-    # ডিভাইস রিপোর্ট টেবিল (এখন device_model যুক্ত)
+    # ডিভাইস রিপোর্ট টেবিল
     c.execute('''CREATE TABLE IF NOT EXISTS device_reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -48,7 +57,7 @@ def init_db():
         reported_at TEXT,
         FOREIGN KEY(user_id) REFERENCES users(id)
     )''')
-    # ইতিহাস টেবিল (লগ)
+    # ইতিহাস টেবিল
     c.execute('''CREATE TABLE IF NOT EXISTS user_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -58,11 +67,12 @@ def init_db():
         FOREIGN KEY(user_id) REFERENCES users(id)
     )''')
 
-    # ডিফল্ট পাসওয়ার্ড সেট করা (যদি না থাকে)
+    # ডিফল্ট গ্লোবাল ও ড্যাশবোর্ড পাসওয়ার্ড সেট করা
     c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
     if not c.fetchone():
-        default_hash = hashlib.sha256("admin123".encode()).hexdigest()
+        default_hash = hash_password("admin123")
         c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (default_hash,))
+        
     c.execute("SELECT value FROM settings WHERE key = 'dashboard_password'")
     if not c.fetchone():
         c.execute("INSERT INTO settings (key, value) VALUES ('dashboard_password', ?)", (hash_password(ADMIN_PASSWORD),))
@@ -70,17 +80,10 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+init_db()  # ডেটাবেস সেটআপ রান করা
 
-def hash_password(pwd: str) -> str:
-    return hashlib.sha256(pwd.encode()).hexdigest()
-
-def verify_password(input_pwd: str, stored_hash: str) -> bool:
-    return hash_password(input_pwd) == stored_hash
-
-# ================= অফলাইন ডিটেক্টর (ব্যাকগ্রাউন্ড থ্রেড) =================
+# ================= অফলাইন ডিটেক্টর থ্রেড =================
 def mark_offline_users():
-    """যাদের ৩০ সেকেন্ড ধরে লাস্ট সিন দেখা যায়নি তাদের ইনঅ্যাক্টিভ করবে"""
     while True:
         time.sleep(10)
         try:
@@ -129,21 +132,17 @@ def client_verify():
         if user:
             user_id, is_active = user
             if is_active == 1:
-                # আপডেট লাস্ট সিন
                 c.execute("UPDATE users SET last_seen = ? WHERE id = ?", (last_seen, user_id))
                 conn.commit()
                 conn.close()
                 return jsonify({"success": True, "message": "Software is already active", "session_token": token})
             else:
-                # রিঅ্যাক্টিভেট
                 c.execute("UPDATE users SET is_active = 1, activated_at = ?, deactivated_at = NULL, session_token = ?, last_seen = ? WHERE id = ?", (now, token, last_seen, user_id))
-                # হিস্টরি লগ
                 c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", (user_id, "REACTIVATE", f"PC: {pc_name}", now))
                 conn.commit()
                 conn.close()
                 return jsonify({"success": True, "message": "Reactivated successfully", "session_token": token})
         else:
-            # নতুন ইউজার
             c.execute("INSERT INTO users (pc_name, hardware_id, is_active, activated_at, session_token, last_seen) VALUES (?, ?, 1, ?, ?, ?)", (pc_name, hardware_id, now, token, last_seen))
             user_id = c.lastrowid
             c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", (user_id, "ACTIVATE", f"New PC: {pc_name}", now))
@@ -194,8 +193,6 @@ def client_device_info():
             return jsonify({"error": "Invalid session"}), 401
 
         user_id = user[0]
-
-        # পুরাতন রিপোর্ট মুছে নতুন ডেটা সেভ
         c.execute("DELETE FROM device_reports WHERE user_id = ?", (user_id,))
         now = datetime.now(timezone.utc).isoformat()
         for dev in devices:
@@ -215,7 +212,6 @@ def admin_get_users():
 
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
-    # ইউজার লিস্ট (সর্বশেষ ডিভাইস মডেল সহ)
     c.execute('''
         SELECT 
             u.id, u.pc_name, u.location, u.is_active, u.activated_at, u.deactivated_at,
@@ -452,7 +448,7 @@ event.target.classList.add('active');
 }
 
 async function fetchUsers() {
-const r = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer dummy' } }); // session handles auth
+const r = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer dummy' } });
 if (!r.ok) { location.href = '/login'; return; }
 const data = await r.json();
 const tbody = document.getElementById('users-body');
@@ -522,7 +518,6 @@ tbody.appendChild(tr);
 });
 }
 
-// লোড এবং অটো রিফ্রেশ
 fetchUsers();
 fetchHistory();
 setInterval(() => { fetchUsers(); fetchHistory(); }, 5000);
