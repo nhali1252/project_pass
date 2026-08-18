@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FINAL FIX: Session reset on password change, default "asdf"
+Final Version:
+- No default global password (must be set via dashboard)
+- Password change revokes all active sessions
+- Includes /health endpoint
 """
 import hashlib
 import json
@@ -20,15 +23,17 @@ app.secret_key = secrets.token_hex(32)
 CORS(app)
 
 # ================= কনফিগারেশন =================
+# শুধুমাত্র ড্যাশবোর্ড লগইনের জন্য পাসওয়ার্ড
 ADMIN_PASSWORD = "admin123"
-DEFAULT_GLOBAL_PASSWORD = "asdf"  
 
+# ================= হ্যাশ ফাংশন =================
 def hash_password(pwd: str) -> str:
     return hashlib.sha256(pwd.encode()).hexdigest()
 
 def verify_password(input_pwd: str, stored_hash: str) -> bool:
     return hash_password(input_pwd) == stored_hash
 
+# ================= ডেটাবেস সেটআপ =================
 def init_db():
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
@@ -62,11 +67,7 @@ def init_db():
         FOREIGN KEY(user_id) REFERENCES users(id)
     )''')
 
-    c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
-    if not c.fetchone():
-        default_hash = hash_password(DEFAULT_GLOBAL_PASSWORD)
-        c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (default_hash,))
-        
+    # শুধুমাত্র ড্যাশবোর্ড পাসওয়ার্ড হ্যাশ সেট করা হবে (global_password_hash ইচ্ছাকৃতভাবে বাদ দেওয়া হয়েছে)
     c.execute("SELECT value FROM settings WHERE key = 'dashboard_password'")
     if not c.fetchone():
         c.execute("INSERT INTO settings (key, value) VALUES ('dashboard_password', ?)", (hash_password(ADMIN_PASSWORD),))
@@ -76,6 +77,7 @@ def init_db():
 
 init_db()
 
+# ================= অফলাইন ডিটেক্টর থ্রেড =================
 def mark_offline_users():
     while True:
         time.sleep(10)
@@ -91,6 +93,7 @@ def mark_offline_users():
 
 threading.Thread(target=mark_offline_users, daemon=True).start()
 
+# ================= ক্লায়েন্ট API =================
 @app.route('/api/client/verify', methods=['POST'])
 def client_verify():
     try:
@@ -104,6 +107,7 @@ def client_verify():
         if not pc_name or not hardware_id or not password:
             return jsonify({"success": False, "message": "Missing required fields"}), 400
 
+        # লঞ্চারের ডামি চেক
         if pc_name == "LauncherInstance" and hardware_id == "LauncherOnlyID":
             return jsonify({"success": True, "message": "Launcher validated", "session_token": "launcher_dummy"}), 200
 
@@ -111,7 +115,13 @@ def client_verify():
         c = conn.cursor()
         c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
         result = c.fetchone()
-        stored_hash = result[0] if result else ""
+        
+        # যদি গ্লোবাল পাসওয়ার্ড এখনও সেট করা না থাকে
+        if not result:
+            conn.close()
+            return jsonify({"success": False, "message": "Global password not configured. Please set it in the Admin Panel."}), 401
+
+        stored_hash = result[0]
         
         if not verify_password(password, stored_hash):
             conn.close()
@@ -188,6 +198,7 @@ def client_device_info():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ================= অ্যাডমিন API =================
 @app.route('/api/admin/users', methods=['GET'])
 def admin_get_users():
     if not session.get('dashboard_logged_in'):
@@ -254,19 +265,19 @@ def admin_set_password():
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
         
-        # 🔥 ১. পাসওয়ার্ড হ্যাশ আপডেট করা
+        # 1. পাসওয়ার্ড হ্যাশ আপডেট করা
         c.execute("UPDATE settings SET value = ? WHERE key = 'global_password_hash'", (hashed,))
         
-        # 🔥 ২. পুরানো সব সেশন টোকেন রিসেট করে অফলাইন করা (যাতে নতুন পাসওয়ার্ড লাগে)
+        # 2. পুরানো সব সেশন টোকেন রিসেট করে অফলাইন করা (পুরানো পাসওয়ার্ড বাতিল)
         c.execute("UPDATE users SET session_token = NULL, last_seen = NULL, is_active = 0, deactivated_at = ? WHERE is_active = 1", (now,))
         
-        # 🔥 ৩. ইতিহাসে লগ করা
+        # 3. ইতিহাসে লগ করা
         c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", 
                   (0, "GLOBAL_PASSWORD_CHANGE", f"New global password set by admin", now))
         
         conn.commit()
         conn.close()
-        return jsonify({"success": True, "message": "Global password updated successfully. All active clients are now offline and must re-login."}), 200
+        return jsonify({"success": True, "message": "Global password updated successfully. All active clients are offline."}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -288,6 +299,7 @@ def admin_get_history():
     history = [{"id": r[0], "pc_name": r[1], "action": r[2], "details": r[3], "timestamp": r[4]} for r in rows]
     return jsonify({"history": history}), 200
 
+# ================= /health এন্ডপয়েন্ট =================
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -296,6 +308,7 @@ def health_check():
         'server': socket.gethostname()
     })
 
+# ================= ড্যাশবোর্ড লগইন =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -324,6 +337,7 @@ def index():
         return redirect(url_for('login'))
     return render_template_string(DASHBOARD_HTML)
 
+# ================= এইচটিএমএল টেমপ্লেট =================
 LOGIN_PAGE = '''
 <!DOCTYPE html>
 <html>
@@ -529,6 +543,6 @@ setInterval(() => { fetchUsers(); fetchHistory(); }, 5000);
 
 if __name__ == '__main__':
     print("\n" + "=" * 70)
-    print("  🔐 ADMIN PANEL - RUNNING")
+    print("  🔐 ADMIN PANEL - RUNNING (No default client password)")
     print("=" * 70)
     app.run(host='0.0.0.0', port=5000, debug=False)
