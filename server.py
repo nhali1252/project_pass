@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-Modern UI version with secure session handling.
+Fixed Admin Login: Environment variable check enforced, check_password_hash used correctly.
 """
 import secrets
 import os
@@ -21,20 +21,25 @@ logger = logging.getLogger(__name__)
 
 # ================= Flask App =================
 app = Flask(__name__)
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
-app.permanent_session_lifetime = timedelta(days=7)
+
+# 🔥 সঠিক কনফিগারেশন (অ্যানালাইসিস অনুযায়ী)
 app.config.update(
+    SECRET_KEY=os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32)),
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',
-    SESSION_COOKIE_SECURE=bool(os.environ.get('COOKIE_SECURE', True)),
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=True,  # HTTPS (api.alii.uk) এর জন্য True
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
 )
 CORS(app)
 
-# ================= Admin Password (fallback to admin123) =================
-ADMIN_PASSWORD_HASH = os.environ.get('ADMIN_PASSWORD_HASH')
+# 🔥 এনভায়রনমেন্ট ভেরিয়েবল থেকে হ্যাশ নেওয়া। যদি না থাকে, সার্ভার স্টার্ট হবে না।
+ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH")
 if not ADMIN_PASSWORD_HASH:
-    logger.warning("⚠️ ADMIN_PASSWORD_HASH not set. Using default password 'admin123'.")
-    ADMIN_PASSWORD_HASH = generate_password_hash("admin123")
+    raise RuntimeError(
+        "ADMIN_PASSWORD_HASH is missing. Generate it with:\n"
+        "python -c \"from werkzeug.security import generate_password_hash; "
+        "print(generate_password_hash('YourAdminPassword'))\""
+    )
 
 # ================= Helper Functions =================
 def hash_password(pwd: str) -> str:
@@ -76,6 +81,7 @@ def init_db():
         timestamp TEXT NOT NULL,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
     )''')
+    # Set default client password (global_password_hash) if not exists
     c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
     if not c.fetchone():
         c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (hash_password("admin123"),))
@@ -298,19 +304,25 @@ def admin_get_history():
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
 
-# ================= Admin Login & Dashboard =================
+# ================= ✅ ফিক্স করা লগইন রুট (অ্যানালাইসিস অনুযায়ী) =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    if request.method == 'POST':
-        password = request.form.get('password', '').strip()
-        if verify_password(password, ADMIN_PASSWORD_HASH):
+    error = None
+
+    if request.method == "POST":
+        entered_password = request.form.get("password", "")
+
+        if not entered_password:
+            error = "Please enter your password."
+        elif check_password_hash(ADMIN_PASSWORD_HASH, entered_password):
             session.clear()
+            session["dashboard_logged_in"] = True
             session.permanent = True
-            session['dashboard_logged_in'] = True
-            return redirect(url_for('index'))
+            return redirect(url_for("index"))
         else:
-            return render_template_string(LOGIN_PAGE, error="Invalid password")
-    return render_template_string(LOGIN_PAGE, error=None)
+            error = "Invalid password."
+
+    return render_template_string(LOGIN_PAGE, error=error)
 
 @app.route('/logout')
 def logout():
