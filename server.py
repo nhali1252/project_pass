@@ -2,6 +2,7 @@
 """
 ADB Commander - Master Control Panel
 With independent Global Password protected Code Generator at /code.
+Uses make_password_blob.py subprocess for signature generation.
 """
 import secrets
 import os
@@ -10,7 +11,7 @@ import socket
 import threading
 import time
 import logging
-import json
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
@@ -299,72 +300,6 @@ def admin_get_history():
     finally:
         conn.close()
 
-# ================= Challenge-Response Signature Generator =================
-# Constants from make_password_blob.py
-CHALLENGE_ALPHABET = set("abcdefghijklmnopqrstuvwxyz0123456789")
-CHALLENGE_LEN = 16
-FNV_OFFSET = 1469598103934665603
-FNV_PRIME = 1099511628211
-
-def parse_int(value, name):
-    if isinstance(value, bool):
-        raise ValueError(f"{name} must not be a boolean")
-    if isinstance(value, int):
-        result = value
-    elif isinstance(value, str):
-        result = int(value, 0)
-    else:
-        raise ValueError(f"{name} must be an integer or 0x... string")
-    if result <= 0:
-        raise ValueError(f"{name} must be positive")
-    return result
-
-def load_private_key():
-    key_path = Path(__file__).parent / "private_key.json"
-    if not key_path.exists():
-        raise FileNotFoundError("private_key.json not found")
-    raw = json.loads(key_path.read_text(encoding="utf-8"))
-    key = raw.get("rsa_private_key")
-    if not isinstance(key, dict):
-        raise ValueError("JSON must contain object field rsa_private_key")
-    n = parse_int(key.get("n"), "rsa_private_key.n")
-    e = parse_int(key.get("e"), "rsa_private_key.e")
-    d = parse_int(key.get("d"), "rsa_private_key.d")
-    # Self-check
-    if pow(pow(123456789, d, n), e, n) != 123456789:
-        raise ValueError("private key self-check failed")
-    return n, e, d
-
-# Load the private key at startup
-try:
-    RSA_N, RSA_E, RSA_D = load_private_key()
-    logger.info("RSA private key loaded successfully.")
-except Exception as e:
-    logger.error(f"Failed to load private key: {e}")
-    RSA_N = RSA_E = RSA_D = None
-
-def challenge_hash(challenge: str, modulus: int) -> int:
-    h = FNV_OFFSET
-    for ch in challenge.encode("ascii"):
-        h ^= ch
-        h = (h * FNV_PRIME) & 0xffffffffffffffff
-    return h % modulus
-
-def validate_challenge(challenge: str) -> None:
-    if len(challenge) != CHALLENGE_LEN:
-        raise ValueError(f"challenge must be exactly {CHALLENGE_LEN} characters")
-    bad = sorted(set(challenge) - CHALLENGE_ALPHABET)
-    if bad:
-        raise ValueError("challenge contains invalid characters: " + "".join(bad))
-
-def make_signature(challenge: str) -> str:
-    if RSA_N is None:
-        raise RuntimeError("RSA key not loaded")
-    validate_challenge(challenge)
-    digest = challenge_hash(challenge, RSA_N)
-    signature = pow(digest, RSA_D, RSA_N)
-    return f"0x{signature:016x}"
-
 # ================= Health Check =================
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -431,11 +366,27 @@ def code_generator():
                     error = "Please enter a valid 16-character challenge."
                 else:
                     try:
-                        output = make_signature(challenge)
-                    except ValueError as e:
-                        error = str(e)
-                    except RuntimeError as e:
-                        error = str(e)
+                        # 🔥 make_password_blob.py রান করা (যেমন ডেস্কটপ অ্যাপ করে)
+                        script_path = os.path.join(os.path.dirname(__file__), "make_password_blob.py")
+                        if not os.path.exists(script_path):
+                            error = "make_password_blob.py not found on server."
+                        else:
+                            # সাবপ্রসেস রান
+                            result = subprocess.run(
+                                ['python3', script_path, challenge],
+                                capture_output=True,
+                                text=True,
+                                timeout=10,
+                                cwd=os.path.dirname(__file__)
+                            )
+                            if result.returncode == 0:
+                                output = result.stdout.strip()
+                            else:
+                                error = f"Script error (code {result.returncode}): {result.stderr.strip()}"
+                    except subprocess.TimeoutExpired:
+                        error = "Signature generation timed out."
+                    except Exception as e:
+                        error = f"Execution error: {e}"
 
     return render_template_string(CODE_PAGE, 
                                    global_password=global_password,
