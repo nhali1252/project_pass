@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-ULTIMATE BUG FIX: Admin login is fixed (admin123), JS ensures no auto-logout.
+FINAL VERSION: Enhanced dashboard, all APIs fixed, no auto-logout.
 """
 import secrets
 import os
@@ -15,12 +15,11 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-# 🔥 সিক্রেট কী ফিক্সড রাখা। সার্ভার রিস্টার্ট দিলেও সেশন থাকবে!
 app.secret_key = "FIXED_ADMIN_SECRET_KEY_1234567890_AND_NOT_CHANGE"
-app.permanent_session_lifetime = timedelta(days=7)  # লগইন ৭ দিন পর্যন্ত থাকবে
+app.permanent_session_lifetime = timedelta(days=7)
 CORS(app)
 
-# ================= অ্যাডমিন পাসওয়ার্ড (১০০% ফিক্সড এবং আলাদা) =================
+# ================= অ্যাডমিন পাসওয়ার্ড (১০০% ফিক্সড) =================
 ADMIN_PASSWORD = "admin123"
 
 # ================= হ্যাশ ফাংশন =================
@@ -63,10 +62,8 @@ def init_db():
         timestamp TEXT NOT NULL,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
     )''')
-    # 🔥 অ্যাডমিনের পাসওয়ার্ড ডাটাবেসে সেভ করা হচ্ছে না! শুধু ক্লায়েন্টের (global_password_hash) জন্য জায়গা রাখছি।
     c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
     if not c.fetchone():
-        # প্রথমবার রান করার সময় ডিফল্ট ক্লায়েন্ট পাসওয়ার্ড ও 'admin123' দিয়ে রাখছি
         c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (hash_password(ADMIN_PASSWORD),))
     conn.commit()
     conn.close()
@@ -273,15 +270,14 @@ def admin_get_history():
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
 
-# ================= অ্যাডমিন লগইন রুট (১০০% ফিক্সড) =================
+# ================= অ্যাডমিন লগইন =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         password = request.form.get('password', '').strip()
-        # 🔥 শুধুমাত্র ফিক্সড পাসওয়ার্ডের সাথে মিলানো হচ্ছে
         if password == ADMIN_PASSWORD:
-            session.clear()  # আগের ভাঙা সেশন মুছে নতুন ক্লিন সেশন বসানো
-            session.permanent = True  # লগইন সেশন ৭ দিনের জন্য ফিক্সড
+            session.clear()
+            session.permanent = True
             session['dashboard_logged_in'] = True
             return redirect(url_for('index'))
         else:
@@ -299,15 +295,15 @@ def index():
         return redirect(url_for('login'))
     return render_template_string(DASHBOARD_HTML)
 
-# ================= UI HTML (টেমপ্লেট) =================
+# ================= UI HTML =================
 LOGIN_PAGE = '''<!DOCTYPE html><html><head><title>Admin Login</title><style>body{background:#111827;color:#f9fafb;display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;margin:0}.box{background:#1f2937;padding:40px;border-radius:12px;width:300px;text-align:center}h2{color:#64ffda}input{width:100%;padding:12px;margin:10px 0;background:#111827;border:1px solid #374151;border-radius:6px;color:#fff}button{width:100%;padding:12px;background:#22c55e;border:none;border-radius:6px;color:#fff;font-weight:bold;cursor:pointer}.error{color:#fca5a5;margin-top:10px}</style></head><body><div class="box"><h2>🔐 Admin Panel</h2><form method="post"><input type="password" name="password" placeholder="Enter Password" required><button type="submit">Login</button></form>{% if error %}<div class="error">{{ error }}</div>{% endif %}</div></body></html>'''
 
-DASHBOARD_HTML = '''<!DOCTYPE html><html><head><title>Admin Panel</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111827;color:#f9fafb;padding:20px;font-family:sans-serif}.container{max-width:1200px;margin:0 auto;background:#1f2937;padding:30px;border-radius:12px}.header{text-align:center;margin-bottom:30px}.header h1{font-size:28px;color:#fff}.header h1 span{color:#64ffda}.card{background:#111827;padding:20px;margin-bottom:20px;border:1px solid #374151;border-radius:8px}.card h3{color:#64ffda;margin-bottom:15px}.input-group{display:flex;gap:10px}input{padding:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;flex:1}.btn{padding:10px 20px;background:#22c55e;border:none;border-radius:6px;color:#fff;cursor:pointer}.btn-danger{background:#ef4444}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{padding:12px;border:1px solid #374151;text-align:left}th{background:#111827;color:#64ffda}.active{color:#22c55e}.inactive{color:#ef4444}.logout{float:right;color:#fca5a5;text-decoration:none}</style></head><body><div class="container"><div class="header"><h1>🔐 <span>Admin Panel</span></h1><a href="/logout" class="logout">Logout</a></div><div class="card"><h3>🔑 Change Global Password</h3><div class="input-group"><input type="password" id="newPwd" placeholder="Enter new global password"><button class="btn" onclick="updatePassword()">Update Password</button></div><div id="msg" style="margin-top:10px;font-size:14px"></div></div><div class="card"><h3>👥 Connected Users</h3><table><thead><tr><th>ID</th><th>PC Name</th><th>Device Model</th><th>Status</th><th>Activated At</th><th>Action</th></tr></thead><tbody id="users-body"></tbody></table></div></div><script>let loggedOut = false;async function fetchUsers(){if(loggedOut)return;try{const r=await fetch('/api/admin/users');if(!r.ok){if(r.status === 401 || r.status === 403){loggedOut=true;location.href='/login';return;}console.error('Server error', r.status);return;}const data=await r.json();const tbody=document.getElementById('users-body');tbody.innerHTML='';if(data.users.length===0){tbody.innerHTML='<tr><td colspan="6" class="text-center">No users.</td></tr>';return;}data.users.forEach(u=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${u.id}</td><td>${u.pc_name}</td><td>${u.device_model||'-'}</td><td><span class="${u.is_active?'active':'inactive'}">${u.is_active?'✅ Active':'❌ Inactive'}</span></td><td>${u.activated_at||'-'}</td><td>${u.is_active?`<button class="btn btn-danger" onclick="deactivate(${u.id})">Deactivate</button>`:'Deactivated'}</td>`;tbody.appendChild(tr);});}catch(e){console.error('Fetch error', e);}}async function deactivate(id){if(!confirm('Deactivate this instance?'))return;const r=await fetch('/api/admin/deactivate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id})});if(r.ok){fetchUsers();}}async function updatePassword(){const pwd=document.getElementById('newPwd').value.trim();if(!pwd||pwd.length<4){document.getElementById('msg').innerHTML='<span style="color:red">Min 4 characters!</span>';return;}const r=await fetch('/api/admin/set_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pwd})});const data=await r.json();if(r.ok){document.getElementById('msg').innerHTML='<span style="color:#86efac;">✅ '+data.message+'</span>';document.getElementById('newPwd').value='';}else{document.getElementById('msg').innerHTML='<span style="color:#fca5a5;">❌ '+data.error+'</span>';}}fetchUsers();setInterval(fetchUsers,5000);</script></body></html>'''
+DASHBOARD_HTML = '''<!DOCTYPE html><html><head><title>Admin Panel</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111827;color:#f9fafb;padding:20px;font-family:sans-serif}.container{max-width:1200px;margin:0 auto;background:#1f2937;padding:30px;border-radius:12px}.header{text-align:center;margin-bottom:30px}.header h1{font-size:28px;color:#fff}.header h1 span{color:#64ffda}.card{background:#111827;padding:20px;margin-bottom:20px;border:1px solid #374151;border-radius:8px}.card h3{color:#64ffda;margin-bottom:15px}.input-group{display:flex;gap:10px}input{padding:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;flex:1}.btn{padding:10px 20px;background:#22c55e;border:none;border-radius:6px;color:#fff;cursor:pointer}.btn-danger{background:#ef4444}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{padding:12px;border:1px solid #374151;text-align:left}th{background:#111827;color:#64ffda}.active{color:#22c55e}.inactive{color:#ef4444}.logout{float:right;color:#fca5a5;text-decoration:none}</style></head><body><div class="container"><div class="header"><h1>🔐 <span>Admin Panel</span></h1><a href="/logout" class="logout">Logout</a></div><div class="card"><h3>🔑 Change Global Password</h3><div class="input-group"><input type="password" id="newPwd" placeholder="Enter new global password"><button class="btn" onclick="updatePassword()">Update Password</button></div><div id="msg" style="margin-top:10px;font-size:14px"></div></div><div class="card"><h3>👥 Connected Users</h3><table><thead><tr><th>ID</th><th>PC Name</th><th>Location</th><th>Device Model</th><th>Status</th><th>Activated At</th><th>Deactivated At</th><th>Action</th></tr></thead><tbody id="users-body"></tbody></table></div></div><script>let loggedOut = false;async function fetchUsers(){if(loggedOut)return;try{const r=await fetch('/api/admin/users');if(!r.ok){if(r.status===401||r.status===403){loggedOut=true;location.href='/login';return;}console.error('Server error',r.status);return;}const data=await r.json();const tbody=document.getElementById('users-body');tbody.innerHTML='';if(data.users.length===0){tbody.innerHTML='<tr><td colspan="8" class="text-center">No users.</td></tr>';return;}data.users.forEach(u=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${u.id}</td><td>${u.pc_name}</td><td>${u.location||'-'}</td><td>${u.device_model||'-'}</td><td><span class="${u.is_active?'active':'inactive'}">${u.is_active?'✅ Active':'❌ Inactive'}</span></td><td>${u.activated_at||'-'}</td><td>${u.deactivated_at||'-'}</td><td>${u.is_active?`<button class="btn btn-danger" onclick="deactivate(${u.id})">Deactivate</button>`:'Deactivated'}</td>`;tbody.appendChild(tr);});}catch(e){console.error('Fetch error',e);}}async function deactivate(id){if(!confirm('Deactivate this instance?'))return;const r=await fetch('/api/admin/deactivate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id})});if(r.ok){fetchUsers();}}async function updatePassword(){const pwd=document.getElementById('newPwd').value.trim();if(!pwd||pwd.length<4){document.getElementById('msg').innerHTML='<span style="color:red">Min 4 characters!</span>';return;}const r=await fetch('/api/admin/set_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pwd})});const data=await r.json();if(r.ok){document.getElementById('msg').innerHTML='<span style="color:#86efac;">✅ '+data.message+'</span>';document.getElementById('newPwd').value='';}else{document.getElementById('msg').innerHTML='<span style="color:#fca5a5;">❌ '+data.error+'</span>';}}fetchUsers();setInterval(fetchUsers,5000);</script></body></html>'''
 
 if __name__ == '__main__':
     print("\n" + "=" * 70)
-    print("  🔐 ADMIN PANEL - NO MORE LOGOUT BUG FIXED")
-    print("  Admin password is fixed: admin123 (NEVER changes)")
-    print("  Client password is stored in DB and changeable.")
+    print("  🔐 ADMIN PANEL - FINAL FIX")
+    print("  Admin password: admin123 (fixed, never changes)")
+    print("  Client password: changeable from dashboard")
     print("=" * 70)
     app.run(host='0.0.0.0', port=5000, debug=False)
