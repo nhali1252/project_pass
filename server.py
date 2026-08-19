@@ -2,6 +2,7 @@
 """
 ADB Commander - Master Control Panel
 Fixed Admin Login: Environment variable check enforced, check_password_hash used correctly.
+Dashboard auto-refresh set to 10 seconds.
 """
 import secrets
 import os
@@ -22,7 +23,6 @@ logger = logging.getLogger(__name__)
 # ================= Flask App =================
 app = Flask(__name__)
 
-# 🔥 সঠিক কনফিগারেশন (অ্যানালাইসিস অনুযায়ী)
 app.config.update(
     SECRET_KEY=os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32)),
     SESSION_COOKIE_HTTPONLY=True,
@@ -304,7 +304,7 @@ def admin_get_history():
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
 
-# ================= ✅ ফিক্স করা লগইন রুট (অ্যানালাইসিস অনুযায়ী) =================
+# ================= ✅ ফিক্স করা লগইন রুট =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
@@ -380,7 +380,7 @@ async function refresh(){if(busy)return;busy=true;try{await Promise.all([fetchUs
 async function deactivate(id){if(!window.confirm('Deactivate this device?'))return;try{await api('/api/admin/deactivate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id})});await refresh()}catch(e){$('msg').textContent=e.message}}
 $('passwordBtn').onclick=async()=>{const pwd=$('newPwd').value;if(pwd.length<8){$('msg').textContent='Use at least 8 characters.';return}try{const d=await api('/api/admin/set_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pwd})});$('msg').textContent=d.message||'Password updated.';$('newPwd').value=''}catch(e){$('msg').textContent=e.message}}
 $('refreshBtn').onclick=refresh;document.querySelectorAll('.tab').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));document.querySelectorAll('[id^="tab-"]').forEach(x=>x.classList.add('hidden'));button.classList.add('active');$('tab-'+button.dataset.tab).classList.remove('hidden')});
-refresh();setInterval(refresh,30000);
+refresh();setInterval(refresh,10000); // 🔥 রিফ্রেশের সময় ১০ সেকেন্ড করা হয়েছে
 </script></body></html>'''
 
 if __name__ == '__main__':
