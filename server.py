@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-With independent Global Password protected Code Generator at /code.
-Uses make_password_blob.py subprocess for signature generation.
+FULL FIX: CORS & API added for Lovable compatibility.
 """
 import secrets
 import os
@@ -12,6 +11,7 @@ import threading
 import time
 import logging
 import subprocess
+import json
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
@@ -24,14 +24,17 @@ logger = logging.getLogger(__name__)
 
 # ================= Flask App =================
 app = Flask(__name__)
+
+# 🔥 CRITICAL FIXES FOR CROSS-ORIGIN (LOVABLE) LOGIN:
 app.config.update(
     SECRET_KEY=os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32)),
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE="None",  # 🔥 Lovable থেকে কুকি পাঠানোর জন্য বাধ্যতামূলক
+    SESSION_COOKIE_SECURE=True,      # 🔥 HTTPS (api.alii.uk) এর জন্য বাধ্যতামূলক
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
 )
-CORS(app)
+# 🔥 `supports_credentials=True` যুক্ত করা আবশ্যক
+CORS(app, supports_credentials=True) 
 
 # ================= Admin password (set via environment) =================
 ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH")
@@ -300,12 +303,54 @@ def admin_get_history():
     finally:
         conn.close()
 
+# ================= 🔥 NEW: JSON Admin Login (for Lovable) =================
+@app.route('/api/admin/login', methods=['POST'])
+def api_admin_login():
+    data = request.get_json()
+    password = data.get('password', '')
+    if verify_password(password, ADMIN_PASSWORD_HASH):
+        session.clear()
+        session["dashboard_logged_in"] = True
+        session.permanent = True
+        return jsonify({"success": True, "message": "Login successful"})
+    else:
+        return jsonify({"success": False, "message": "Invalid password"}), 401
+
+# ================= 🔥 Signature Generator (for Lovable) =================
+@app.route('/api/admin/generate_signature', methods=['POST'])
+def admin_generate_signature():
+    if not session.get('dashboard_logged_in'):
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        data = request.get_json()
+        challenge = data.get('challenge', '').strip()
+        if not challenge:
+            return jsonify({"error": "Challenge required"}), 400
+
+        script_path = os.path.join(os.path.dirname(__file__), "make_password_blob.py")
+        if not os.path.exists(script_path):
+            return jsonify({"error": "make_password_blob.py not found on server."}), 500
+
+        result = subprocess.run(
+            ['python3', script_path, challenge],
+            capture_output=True, text=True, timeout=10,
+            cwd=os.path.dirname(__file__)
+        )
+        if result.returncode == 0:
+            return jsonify({"signature": result.stdout.strip()}), 200
+        else:
+            return jsonify({"error": f"Script error: {result.stderr.strip()}"}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Signature generation timed out."}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ================= Health Check =================
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
 
-# ================= Admin Login & Dashboard =================
+# ================= Admin HTML Login & Dashboard =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
@@ -333,10 +378,9 @@ def index():
         return redirect(url_for('login'))
     return render_template_string(DASHBOARD_HTML)
 
-# ================= 🔥 External Global Password Protected Page: /code =================
+# ================= 🔥 External Global Password Protected HTML Page: /code =================
 @app.route('/code', methods=['GET', 'POST'])
 def code_generator():
-    # ফর্ম থেকে ইনপুট নেওয়া
     global_password = ""
     challenge = ""
     output = ""
@@ -349,7 +393,6 @@ def code_generator():
         if not global_password:
             error = "Please enter the Global Password."
         else:
-            # সার্ভার থেকে গ্লোবাল পাসওয়ার্ড হ্যাশ রিট্রিভ করা
             conn = sqlite3.connect('licenses.db', timeout=5)
             c = conn.cursor()
             c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
@@ -366,17 +409,13 @@ def code_generator():
                     error = "Please enter a valid 16-character challenge."
                 else:
                     try:
-                        # 🔥 make_password_blob.py রান করা (যেমন ডেস্কটপ অ্যাপ করে)
                         script_path = os.path.join(os.path.dirname(__file__), "make_password_blob.py")
                         if not os.path.exists(script_path):
                             error = "make_password_blob.py not found on server."
                         else:
-                            # সাবপ্রসেস রান
                             result = subprocess.run(
                                 ['python3', script_path, challenge],
-                                capture_output=True,
-                                text=True,
-                                timeout=10,
+                                capture_output=True, text=True, timeout=10,
                                 cwd=os.path.dirname(__file__)
                             )
                             if result.returncode == 0:
