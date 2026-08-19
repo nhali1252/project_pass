@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FINAL VERSION WITH ROW_FACTORY FIX.
+Modern UI version with secure session handling.
 """
 import secrets
 import os
@@ -15,23 +15,37 @@ from flask import Flask, request, jsonify, render_template_string, redirect, url
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# Logging setup
+# ================= Logging =================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ================= Flask App =================
 app = Flask(__name__)
-app.secret_key = "FIXED_ADMIN_SECRET_KEY_1234567890_AND_NOT_CHANGE"
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=7)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=bool(os.environ.get('COOKIE_SECURE', True)),
+)
 CORS(app)
 
-ADMIN_PASSWORD = "admin123"
+# ================= Admin Password (change this for production) =================
+# For security, it's recommended to set ADMIN_PASSWORD_HASH via environment variable.
+# If not set, we fall back to a default hash for "admin123" and log a warning.
+ADMIN_PASSWORD_HASH = os.environ.get('ADMIN_PASSWORD_HASH')
+if not ADMIN_PASSWORD_HASH:
+    logger.warning("⚠️ ADMIN_PASSWORD_HASH not set. Using default password 'admin123'. Please set it via environment.")
+    ADMIN_PASSWORD_HASH = generate_password_hash("admin123")
 
+# ================= Helper Functions =================
 def hash_password(pwd: str) -> str:
     return generate_password_hash(pwd)
 
 def verify_password(input_pwd: str, stored_hash: str) -> bool:
     return check_password_hash(stored_hash, input_pwd)
 
+# ================= Database =================
 def init_db():
     conn = sqlite3.connect('licenses.db', timeout=20)
     c = conn.cursor()
@@ -64,15 +78,17 @@ def init_db():
         timestamp TEXT NOT NULL,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
     )''')
+    # Set default client password if not exists (optional)
     c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
     if not c.fetchone():
-        c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (hash_password(ADMIN_PASSWORD),))
+        c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (hash_password("admin123"),))
     conn.commit()
     conn.close()
-    logger.info("Database initialized with default password admin123")
+    logger.info("Database initialized.")
 
 init_db()
 
+# ================= Offline monitor =================
 def mark_offline_users():
     while True:
         time.sleep(10)
@@ -88,7 +104,7 @@ def mark_offline_users():
 
 threading.Thread(target=mark_offline_users, daemon=True).start()
 
-# ================= ক্লায়েন্ট API =================
+# ================= Client API =================
 @app.route('/api/client/verify', methods=['POST'])
 def client_verify():
     conn = None
@@ -192,13 +208,12 @@ def client_device_info():
     finally:
         if conn: conn.close()
 
-# ================= অ্যাডমিন API =================
+# ================= Admin API =================
 @app.route('/api/admin/users', methods=['GET'])
 def admin_get_users():
     if not session.get('dashboard_logged_in'):
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        # 🔥 বাগ ফিক্স: conn.row_factory = sqlite3.Row যুক্ত করা হয়েছে
         conn = sqlite3.connect('licenses.db', timeout=10)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
@@ -243,8 +258,8 @@ def admin_set_password():
     try:
         data = request.get_json()
         new_password = data.get('new_password')
-        if not new_password or len(new_password) < 4:
-            return jsonify({"error": "Password must be at least 4 characters"}), 400
+        if not new_password or len(new_password) < 8:
+            return jsonify({"error": "Password must be at least 8 characters"}), 400
         
         now = datetime.now(timezone.utc).isoformat()
         new_hash = hash_password(new_password)
@@ -268,7 +283,6 @@ def admin_get_history():
     if not session.get('dashboard_logged_in'):
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        # 🔥 বাগ ফিক্স: conn.row_factory = sqlite3.Row যুক্ত করা হয়েছে
         conn = sqlite3.connect('licenses.db', timeout=10)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
@@ -282,15 +296,17 @@ def admin_get_history():
     finally:
         conn.close()
 
+# ================= Health Check =================
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
 
+# ================= Admin Login & Dashboard =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         password = request.form.get('password', '').strip()
-        if password == ADMIN_PASSWORD:
+        if verify_password(password, ADMIN_PASSWORD_HASH):
             session.clear()
             session.permanent = True
             session['dashboard_logged_in'] = True
@@ -310,15 +326,53 @@ def index():
         return redirect(url_for('login'))
     return render_template_string(DASHBOARD_HTML)
 
-# ================= UI HTML =================
-LOGIN_PAGE = '''<!DOCTYPE html><html><head><title>Admin Login</title><style>body{background:#111827;color:#f9fafb;display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;margin:0}.box{background:#1f2937;padding:40px;border-radius:12px;width:300px;text-align:center}h2{color:#64ffda}input{width:100%;padding:12px;margin:10px 0;background:#111827;border:1px solid #374151;border-radius:6px;color:#fff}button{width:100%;padding:12px;background:#22c55e;border:none;border-radius:6px;color:#fff;font-weight:bold;cursor:pointer}.error{color:#fca5a5;margin-top:10px}</style></head><body><div class="box"><h2>🔐 Admin Panel</h2><form method="post"><input type="password" name="password" placeholder="Enter Password" required><button type="submit">Login</button></form>{% if error %}<div class="error">{{ error }}</div>{% endif %}</div></body></html>'''
+# ================= UI Templates (Modern versions) =================
+LOGIN_PAGE = r'''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Admin login</title>
+  <style>
+    :root{color-scheme:dark;--bg:#080b14;--panel:#111827;--line:#263247;--text:#eef2ff;--muted:#9aa8bf;--brand:#8b5cf6;--brand2:#06b6d4;--danger:#fb7185}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 20% 10%,#1d1740,transparent 35%),var(--bg);color:var(--text);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+    .box{width:min(100%,410px);padding:34px;border:1px solid var(--line);border-radius:24px;background:color-mix(in srgb,var(--panel) 92%,transparent);box-shadow:0 24px 70px #0008;backdrop-filter:blur(16px)}
+    .logo{width:52px;height:52px;display:grid;place-items:center;border-radius:16px;background:linear-gradient(135deg,var(--brand),var(--brand2));font-size:25px;margin-bottom:22px}.eyebrow{color:#a5b4fc;font-size:12px;text-transform:uppercase;letter-spacing:.14em;font-weight:800}h1{margin:7px 0 8px;font-size:29px;letter-spacing:-.03em}p{margin:0 0 24px;color:var(--muted)}label{display:block;margin:0 0 8px;font-weight:700}input{width:100%;padding:13px 14px;border:1px solid var(--line);border-radius:12px;background:#0b1120;color:var(--text);outline:0;font:inherit}input:focus{border-color:var(--brand2);box-shadow:0 0 0 4px #06b6d422}button{width:100%;margin-top:16px;padding:13px;border:0;border-radius:12px;background:linear-gradient(135deg,var(--brand),var(--brand2));color:white;font:800 15px inherit;cursor:pointer}button:hover{filter:brightness(1.1)}.error{margin-top:15px;padding:11px 13px;border-radius:10px;background:#7f1d1d55;color:#fecdd3;border:1px solid #fb718566}
+  </style>
+</head>
+<body><main class="box"><div class="logo">🔐</div><div class="eyebrow">Secure workspace</div><h1>Admin panel</h1><p>Sign in to manage connected devices and activity.</p><form method="post" autocomplete="on"><label for="password">Admin password</label><input id="password" type="password" name="password" placeholder="Enter your password" autocomplete="current-password" required autofocus><button type="submit">Sign in</button></form>{% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}</main></body>
+</html>'''
 
-DASHBOARD_HTML = '''<!DOCTYPE html><html><head><title>Admin Panel</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111827;color:#f9fafb;padding:20px;font-family:sans-serif}.container{max-width:1200px;margin:0 auto;background:#1f2937;padding:30px;border-radius:12px}.header{text-align:center;margin-bottom:30px}.header h1{font-size:28px;color:#fff}.header h1 span{color:#64ffda}.card{background:#111827;padding:20px;margin-bottom:20px;border:1px solid #374151;border-radius:8px}.card h3{color:#64ffda;margin-bottom:15px}.input-group{display:flex;gap:10px}input{padding:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;flex:1}.btn{padding:10px 20px;background:#22c55e;border:none;border-radius:6px;color:#fff;cursor:pointer}.btn-danger{background:#ef4444}.tabs{display:flex;gap:10px;margin-bottom:20px}.tab-btn{background:#374151;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer}.tab-btn.active{background:#64ffda;color:#111827}.hidden{display:none}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{padding:12px;border:1px solid #374151;text-align:left}th{background:#111827;color:#64ffda}.active{color:#22c55e}.inactive{color:#ef4444}.logout{float:right;color:#fca5a5;text-decoration:none}.refresh-btn{background:#1e3a8a;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer}</style></head><body><div class="container"><div class="header"><h1>🔐 <span>Admin Panel</span></h1><a href="/logout" class="logout">Logout</a></div><div class="card"><h3>🔑 Change Global Password</h3><div class="input-group"><input type="password" id="newPwd" placeholder="Enter new global password"><button class="btn" onclick="updatePassword()">Update Password</button></div><div id="msg" style="margin-top:10px;font-size:14px"></div></div><div class="tabs"><button class="tab-btn active" onclick="switchTab('users')">👤 Users</button><button class="tab-btn" onclick="switchTab('history')">📜 History</button></div><div id="tab-users"><div class="card"><h3>👥 Connected Users <button class="refresh-btn" onclick="fetchUsers()">↻ Refresh</button></h3><table><thead><tr><th>ID</th><th>PC Name</th><th>Location</th><th>Device Model</th><th>Status</th><th>Activated At</th><th>Deactivated At</th><th>Action</th></tr></thead><tbody id="users-body"></tbody></table></div></div><div id="tab-history" class="hidden"><div class="card"><h3>📜 History <button class="refresh-btn" onclick="fetchHistory()">↻ Refresh</button></h3><table><thead><tr><th>ID</th><th>PC Name</th><th>Action</th><th>Details</th><th>Timestamp</th></tr></thead><tbody id="history-body"></tbody></table></div></div></div><script>let loggedOut=false;async function fetchUsers(){if(loggedOut)return;try{const r=await fetch('/api/admin/users');if(!r.ok){if(r.status===401||r.status===403){loggedOut=true;location.href='/login';return;}console.error('Server error',r.status);return;}const data=await r.json();const tbody=document.getElementById('users-body');tbody.innerHTML='';if(data.users.length===0){tbody.innerHTML='<tr><td colspan="8" class="text-center">No users.</td></tr>';return;}data.users.forEach(u=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${u.id}</td><td>${u.pc_name}</td><td>${u.location||'-'}</td><td>${u.device_model||'-'}</td><td><span class="${u.is_active?'active':'inactive'}">${u.is_active?'✅ Active':'❌ Inactive'}</span></td><td>${u.activated_at||'-'}</td><td>${u.deactivated_at||'-'}</td><td>${u.is_active?`<button class="btn btn-danger" onclick="deactivate(${u.id})">Deactivate</button>`:'Deactivated'}</td>`;tbody.appendChild(tr);});}catch(e){console.error('Fetch error',e);}}async function deactivate(id){if(!confirm('Deactivate this instance?'))return;const r=await fetch('/api/admin/deactivate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id})});if(r.ok){fetchUsers();fetchHistory();}}async function updatePassword(){const pwd=document.getElementById('newPwd').value.trim();if(!pwd||pwd.length<4){document.getElementById('msg').innerHTML='<span style="color:red">Min 4 characters!</span>';return;}const r=await fetch('/api/admin/set_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pwd})});const data=await r.json();if(r.ok){document.getElementById('msg').innerHTML='<span style="color:#86efac;">✅ '+data.message+'</span>';document.getElementById('newPwd').value='';}else{document.getElementById('msg').innerHTML='<span style="color:#fca5a5;">❌ '+data.error+'</span>';}}async function fetchHistory(){if(loggedOut)return;try{const r=await fetch('/api/admin/history');if(!r.ok){if(r.status===401||r.status===403){loggedOut=true;location.href='/login';return;}console.error('Server error',r.status);return;}const data=await r.json();const tbody=document.getElementById('history-body');tbody.innerHTML='';if(data.history.length===0){tbody.innerHTML='<tr><td colspan="5" class="text-center">No history yet.</td></tr>';return;}data.history.forEach(h=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${h.id}</td><td>${h.pc_name}</td><td>${h.action}</td><td>${h.details||'-'}</td><td>${h.timestamp}</td>`;tbody.appendChild(tr);});}catch(e){console.error('Fetch error',e);}}function switchTab(tab){document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('.hidden').forEach(e=>e.classList.add('hidden'));document.getElementById('tab-'+tab).classList.remove('hidden');event.target.classList.add('active');}fetchUsers();fetchHistory();setInterval(()=>{fetchUsers();fetchHistory();},10000);</script></body></html>'''
+DASHBOARD_HTML = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Admin panel</title>
+<style>
+:root{color-scheme:dark;--bg:#080b14;--panel:#111827;--panel2:#0d1424;--line:#263247;--text:#eef2ff;--muted:#9aa8bf;--brand:#8b5cf6;--cyan:#06b6d4;--green:#34d399;--red:#fb7185;--yellow:#fbbf24}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 0,#1e1642,transparent 30%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}.shell{width:min(1400px,100%);margin:auto;padding:24px}.topbar{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:24px}.brand{display:flex;align-items:center;gap:12px}.mark{width:44px;height:44px;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,var(--brand),var(--cyan));font-size:21px}h1,h2,h3{margin:0;letter-spacing:-.025em}h1{font-size:24px}.sub{color:var(--muted);margin-top:3px}.logout{color:#fecdd3;text-decoration:none;border:1px solid #fb718544;padding:9px 13px;border-radius:10px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:18px}.card{background:linear-gradient(145deg,#141d31,#0e1525);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:0 12px 35px #0002}.stat-label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.stat-value{font-size:28px;font-weight:850;margin-top:7px}.card h2{font-size:17px;margin-bottom:15px}.toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:15px}.tabs{display:flex;gap:8px}.tab{border:1px solid var(--line);background:var(--panel2);color:var(--muted);padding:9px 14px;border-radius:10px;cursor:pointer;font:700 13px inherit}.tab.active{color:#fff;background:linear-gradient(135deg,#6d43cf,#087f9d);border-color:transparent}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:13px}table{width:100%;border-collapse:collapse;min-width:900px}th,td{padding:13px 14px;text-align:left;border-bottom:1px solid #26324799;white-space:nowrap}th{color:#a5b4fc;background:#0b1120;font-size:12px;text-transform:uppercase;letter-spacing:.06em}tr:last-child td{border-bottom:0}td{color:#dbe4f5}.status{display:inline-flex;align-items:center;gap:6px;font-weight:750}.active{color:var(--green)}.inactive{color:var(--red)}.btn{border:0;border-radius:9px;padding:9px 12px;color:#fff;background:#2563eb;cursor:pointer;font:750 13px inherit}.btn:hover,.tab:hover{filter:brightness(1.12)}.danger{background:#be123c}.refresh{background:#334155}.settings{display:flex;gap:10px;align-items:center}.settings input{max-width:360px;flex:1}input{padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:#0b1120;color:#fff;outline:0;font:inherit}input:focus{border-color:var(--cyan);box-shadow:0 0 0 4px #06b6d422}.message{min-height:22px;margin-top:10px;color:var(--muted)}.empty{text-align:center;color:var(--muted);padding:25px}.hidden{display:none!important}@media(max-width:800px){.shell{padding:15px}.topbar{align-items:flex-start}.grid{grid-template-columns:1fr}.settings{align-items:stretch;flex-direction:column}.settings input{max-width:none;width:100%}.settings .btn{width:100%}}
+</style></head>
+<body><main class="shell">
+<header class="topbar"><div class="brand"><div class="mark">🔐</div><div><h1>Admin panel</h1><div class="sub">Device access and audit activity</div></div></div><a class="logout" href="/logout">Log out</a></header>
+<section class="grid"><div class="card"><div class="stat-label">Total users</div><div class="stat-value" id="total-users">—</div></div><div class="card"><div class="stat-label">Active devices</div><div class="stat-value active" id="active-users">—</div></div><div class="card"><div class="stat-label">Last sync</div><div class="stat-value" id="last-sync" style="font-size:18px">—</div></div></section>
+<section class="card"><h2>Global client password</h2><div class="settings"><input id="newPwd" type="password" minlength="8" placeholder="New password (minimum 8 characters)" autocomplete="new-password"><button class="btn" id="passwordBtn">Update password</button></div><div id="msg" class="message" role="status" aria-live="polite"></div></section>
+<section class="card" style="margin-top:18px"><div class="toolbar"><div class="tabs"><button class="tab active" data-tab="users">Users</button><button class="tab" data-tab="history">History</button></div><button class="btn refresh" id="refreshBtn">↻ Refresh</button></div>
+<div id="tab-users"><div class="table-wrap"><table><thead><tr><th>ID</th><th>PC name</th><th>Location</th><th>Device model</th><th>Status</th><th>Activated</th><th>Deactivated</th><th>Action</th></tr></thead><tbody id="users-body"></tbody></table></div></div>
+<div id="tab-history" class="hidden"><div class="table-wrap"><table><thead><tr><th>ID</th><th>PC name</th><th>Action</th><th>Details</th><th>Timestamp</th></tr></thead><tbody id="history-body"></tbody></table></div></div></section></main>
+<script>
+'use strict';
+let busy=false;
+const $=id=>document.getElementById(id);
+const escapeHTML=value=>String(value??'-').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+async function api(url,options={}){const r=await fetch(url,{credentials:'same-origin',...options});if(r.status===401||r.status===403){location.href='/login';throw Error('Session expired');}let data={};try{data=await r.json()}catch{}if(!r.ok)throw Error(data.error||`Request failed (${r.status})`);return data}
+function cell(value){const td=document.createElement('td');td.textContent=value??'-';return td}
+async function fetchUsers(){const data=await api('/api/admin/users');const body=$('users-body');body.replaceChildren();const users=Array.isArray(data.users)?data.users:[];$('total-users').textContent=users.length;$('active-users').textContent=users.filter(u=>Boolean(u.is_active)).length;$('last-sync').textContent=new Date().toLocaleTimeString();if(!users.length){body.innerHTML='<tr><td colspan="8" class="empty">No users found.</td></tr>';return}users.forEach(u=>{const tr=document.createElement('tr');[u.id,u.pc_name,u.location,u.device_model].forEach(v=>tr.appendChild(cell(v)));const status=cell('');status.innerHTML=`<span class="status ${u.is_active?'active':'inactive'}">${u.is_active?'● Active':'● Inactive'}</span>`;tr.appendChild(status);tr.appendChild(cell(u.activated_at));tr.appendChild(cell(u.deactivated_at));const action=document.createElement('td');if(u.is_active){const b=document.createElement('button');b.className='btn danger';b.textContent='Deactivate';b.onclick=()=>deactivate(u.id);action.appendChild(b)}else action.textContent='Deactivated';tr.appendChild(action);body.appendChild(tr)})}
+async function fetchHistory(){const data=await api('/api/admin/history');const body=$('history-body');body.replaceChildren();const history=Array.isArray(data.history)?data.history:[];if(!history.length){body.innerHTML='<tr><td colspan="5" class="empty">No history yet.</td></tr>';return}history.forEach(h=>{const tr=document.createElement('tr');[h.id,h.pc_name,h.action,h.details,h.timestamp].forEach(v=>tr.appendChild(cell(v)));body.appendChild(tr)})}
+async function refresh(){if(busy)return;busy=true;try{await Promise.all([fetchUsers(),fetchHistory()])}catch(e){$('msg').textContent=e.message}finally{busy=false}}
+async function deactivate(id){if(!window.confirm('Deactivate this device?'))return;try{await api('/api/admin/deactivate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id})});await refresh()}catch(e){$('msg').textContent=e.message}}
+$('passwordBtn').onclick=async()=>{const pwd=$('newPwd').value;if(pwd.length<8){$('msg').textContent='Use at least 8 characters.';return}try{const d=await api('/api/admin/set_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pwd})});$('msg').textContent=d.message||'Password updated.';$('newPwd').value=''}catch(e){$('msg').textContent=e.message}}
+$('refreshBtn').onclick=refresh;document.querySelectorAll('.tab').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));document.querySelectorAll('[id^="tab-"]').forEach(x=>x.classList.add('hidden'));button.classList.add('active');$('tab-'+button.dataset.tab).classList.remove('hidden')});
+refresh();setInterval(refresh,30000);
+</script></body></html>'''
 
 if __name__ == '__main__':
-    print("\n" + "=" * 70)
-    print("  🔐 ADMIN PANEL - FINAL VERSION WITH HISTORY TAB")
-    print("  Admin password: admin123 (fixed, never changes)")
-    print("  Client password: changeable from dashboard")
-    print("=" * 70)
     app.run(host='0.0.0.0', port=5000, debug=False)
