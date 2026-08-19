@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FINAL 100% FIXED VERSION: Bypass removed, Key mismatch fixed, Secure hashing added.
-Route syntax fixed for `/api/admin/history`.
+FINAL FIXED VERSION:
+- Admin password is hardcoded as 'admin123' (not stored in DB)
+- Client software password is stored in DB as 'global_password_hash' and changeable from dashboard
+- Session secret key is fixed to avoid logout on restart
+- Permanent session with 7-day lifetime
 """
 import secrets
 import os
@@ -16,14 +19,15 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(32)
+app.secret_key = "REPLACE_THIS_WITH_A_FIXED_SECRET_STRING_AT_LEAST_32_CHARS"  # আপনি এখানে আপনার পছন্দের একটি ফিক্সড সিক্রেট দিতে পারেন
+app.permanent_session_lifetime = timedelta(days=7)  # সেশন ৭ দিন পর্যন্ত সক্রিয় থাকবে
 CORS(app)
 
-# ================= কনফিগারেশন (সব পাসওয়ার্ড এখানেই থাকবে) =================
-# ড্যাশবোর্ড ও গ্লোবাল পাসওয়ার্ড একই হবে। init_db() এই পাসওয়ার্ড দিয়ে প্রথমবার সেট করবে।
-ADMIN_PASSWORD = "admin123" 
+# ================= কনফিগারেশন =================
+# অ্যাডমিন প্যানেল লগইনের জন্য ফিক্সড পাসওয়ার্ড (ডাটাবেসে সেভ হবে না)
+ADMIN_PASSWORD = "admin123"
 
-# ================= হ্যাশ ফাংশন (Werkzeug ব্যবহার করা হচ্ছে) =================
+# ================= হ্যাশ ফাংশন (Werkzeug) =================
 def hash_password(pwd: str) -> str:
     return generate_password_hash(pwd)
 
@@ -45,7 +49,6 @@ def init_db():
         session_token TEXT UNIQUE,
         last_seen TEXT
     )''')
-    # 🔥 একক পাসওয়ার্ড টেবিল
     c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS device_reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,11 +68,7 @@ def init_db():
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
     )''')
 
-    # 🔥 বাগ ফিক্স: শুধুমাত্র 'global_password_hash' ব্যবহার করা হবে (কোনো dashboard_password নেই)
-    c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
-    if not c.fetchone():
-        c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (hash_password(ADMIN_PASSWORD),))
-
+    # ক্লায়েন্ট পাসওয়ার্ড (software) - init_db() তে সেট করা নেই, শুধু টেবিল তৈরি।
     conn.commit()
     conn.close()
 
@@ -105,12 +104,12 @@ def client_verify():
         if not pc_name or not hardware_id or not password:
             return jsonify({"success": False, "message": "Missing required fields"}), 400
 
-        # 🛑 বাগ ফিক্স:  Launcher Bypass সম্পূর্ণ ডিলিট করা হয়েছে
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
         c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
         result = c.fetchone()
         
+        # 🔥 যদি ক্লায়েন্ট পাসওয়ার্ড এখনও সেট না করা থাকে
         if not result:
             conn.close()
             return jsonify({"success": False, "message": "Global password not configured. Please set it in the Admin Panel."}), 401
@@ -245,14 +244,13 @@ def admin_set_password():
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
         
-        # 🔥 বাগ ফিক্স: UPDATE এর পরিবর্তে INSERT ... ON CONFLICT ব্যবহার করা হলো
-        # যেকোনো অবস্থায় এটি হ্যাশটি আপডেট করবে।
+        # 🔥 ক্লায়েন্ট পাসওয়ার্ড আপডেট করা (upsert)
         c.execute("""
             INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (new_hash,))
         
-        # 🔥 সব সেশন রিভোক করা হচ্ছে (পাসওয়ার্ড পরিবর্তন করলে পুরোনো সেশন বাতিল)
+        # 🔥 সব সেশন রিভোক করা
         c.execute("""
             UPDATE users SET session_token = NULL, last_seen = NULL, 
             is_active = 0, deactivated_at = ? WHERE is_active = 1
@@ -267,13 +265,12 @@ def admin_set_password():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/admin/history', methods=['GET'])  # 🔥 FIXED: methods=['GET'] যুক্ত করা হয়েছে
+@app.route('/api/admin/history', methods=['GET'])
 def admin_get_history():
     if not session.get('dashboard_logged_in'):
         return jsonify({"error": "Unauthorized"}), 401
     conn = sqlite3.connect('licenses.db')
     c = conn.cursor()
-    # 🔥 বাগ ফিক্স: LEFT JOIN ব্যবহার করা হয়েছে, যাতে সিস্টেম লগগুলো (যেমন পাসওয়ার্ড চেঞ্জ) দেখতে পাওয়া যায়
     c.execute('''
         SELECT h.id, COALESCE(u.pc_name, 'SYSTEM') AS pc_name, h.action, h.details, h.timestamp
         FROM user_history h
@@ -299,13 +296,9 @@ def health_check():
 def login():
     if request.method == 'POST':
         password = request.form.get('password')
-        conn = sqlite3.connect('licenses.db')
-        c = conn.cursor()
-        c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
-        result = c.fetchone()
-        stored_hash = result[0] if result else ""
-        conn.close()
-        if verify_password(password, stored_hash):
+        # ✅ অ্যাডমিন পাসওয়ার্ড ফিক্সড `admin123` এর সাথে যাচাই করা হচ্ছে
+        if password == ADMIN_PASSWORD:
+            session.permanent = True
             session['dashboard_logged_in'] = True
             return redirect(url_for('index'))
         else:
@@ -331,5 +324,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html><html><head><title>Admin Panel</title><meta n
 if __name__ == '__main__':
     print("\n" + "=" * 70)
     print("  🔐 ADMIN PANEL - FINAL FIXED VERSION")
+    print("  Admin password is fixed: admin123")
+    print("  Client password is stored in DB and changeable.")
     print("=" * 70)
     app.run(host='0.0.0.0', port=5000, debug=False)
