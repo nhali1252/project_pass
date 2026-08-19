@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-Fully compatible with adb_commander_client_fixed.py
+With independent Global Password protected Code Generator at /code.
 """
 import secrets
 import os
@@ -10,6 +10,8 @@ import socket
 import threading
 import time
 import logging
+import json
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
 from flask_cors import CORS
@@ -25,7 +27,7 @@ app.config.update(
     SECRET_KEY=os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32)),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=True,          # True because api.alii.uk uses HTTPS
+    SESSION_COOKIE_SECURE=True,
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
 )
 CORS(app)
@@ -297,6 +299,72 @@ def admin_get_history():
     finally:
         conn.close()
 
+# ================= Challenge-Response Signature Generator =================
+# Constants from make_password_blob.py
+CHALLENGE_ALPHABET = set("abcdefghijklmnopqrstuvwxyz0123456789")
+CHALLENGE_LEN = 16
+FNV_OFFSET = 1469598103934665603
+FNV_PRIME = 1099511628211
+
+def parse_int(value, name):
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must not be a boolean")
+    if isinstance(value, int):
+        result = value
+    elif isinstance(value, str):
+        result = int(value, 0)
+    else:
+        raise ValueError(f"{name} must be an integer or 0x... string")
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
+
+def load_private_key():
+    key_path = Path(__file__).parent / "private_key.json"
+    if not key_path.exists():
+        raise FileNotFoundError("private_key.json not found")
+    raw = json.loads(key_path.read_text(encoding="utf-8"))
+    key = raw.get("rsa_private_key")
+    if not isinstance(key, dict):
+        raise ValueError("JSON must contain object field rsa_private_key")
+    n = parse_int(key.get("n"), "rsa_private_key.n")
+    e = parse_int(key.get("e"), "rsa_private_key.e")
+    d = parse_int(key.get("d"), "rsa_private_key.d")
+    # Self-check
+    if pow(pow(123456789, d, n), e, n) != 123456789:
+        raise ValueError("private key self-check failed")
+    return n, e, d
+
+# Load the private key at startup
+try:
+    RSA_N, RSA_E, RSA_D = load_private_key()
+    logger.info("RSA private key loaded successfully.")
+except Exception as e:
+    logger.error(f"Failed to load private key: {e}")
+    RSA_N = RSA_E = RSA_D = None
+
+def challenge_hash(challenge: str, modulus: int) -> int:
+    h = FNV_OFFSET
+    for ch in challenge.encode("ascii"):
+        h ^= ch
+        h = (h * FNV_PRIME) & 0xffffffffffffffff
+    return h % modulus
+
+def validate_challenge(challenge: str) -> None:
+    if len(challenge) != CHALLENGE_LEN:
+        raise ValueError(f"challenge must be exactly {CHALLENGE_LEN} characters")
+    bad = sorted(set(challenge) - CHALLENGE_ALPHABET)
+    if bad:
+        raise ValueError("challenge contains invalid characters: " + "".join(bad))
+
+def make_signature(challenge: str) -> str:
+    if RSA_N is None:
+        raise RuntimeError("RSA key not loaded")
+    validate_challenge(challenge)
+    digest = challenge_hash(challenge, RSA_N)
+    signature = pow(digest, RSA_D, RSA_N)
+    return f"0x{signature:016x}"
+
 # ================= Health Check =================
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -329,6 +397,51 @@ def index():
     if not session.get('dashboard_logged_in'):
         return redirect(url_for('login'))
     return render_template_string(DASHBOARD_HTML)
+
+# ================= 🔥 External Global Password Protected Page: /code =================
+@app.route('/code', methods=['GET', 'POST'])
+def code_generator():
+    # ফর্ম থেকে ইনপুট নেওয়া
+    global_password = ""
+    challenge = ""
+    output = ""
+    error = ""
+    
+    if request.method == 'POST':
+        global_password = request.form.get('global_password', '').strip()
+        challenge = request.form.get('challenge', '').strip()
+
+        if not global_password:
+            error = "Please enter the Global Password."
+        else:
+            # সার্ভার থেকে গ্লোবাল পাসওয়ার্ড হ্যাশ রিট্রিভ করা
+            conn = sqlite3.connect('licenses.db', timeout=5)
+            c = conn.cursor()
+            c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
+            result = c.fetchone()
+            conn.close()
+
+            if not result:
+                error = "Global password is not configured in the system."
+            else:
+                stored_hash = result[0]
+                if not verify_password(global_password, stored_hash):
+                    error = "Invalid Global Password."
+                elif not challenge:
+                    error = "Please enter a valid 16-character challenge."
+                else:
+                    try:
+                        output = make_signature(challenge)
+                    except ValueError as e:
+                        error = str(e)
+                    except RuntimeError as e:
+                        error = str(e)
+
+    return render_template_string(CODE_PAGE, 
+                                   global_password=global_password,
+                                   challenge=challenge, 
+                                   output=output, 
+                                   error=error)
 
 # ================= UI Templates =================
 LOGIN_PAGE = r'''<!doctype html>
@@ -377,6 +490,32 @@ $('passwordBtn').onclick=async()=>{const pwd=$('newPwd').value;if(pwd.length<8){
 $('refreshBtn').onclick=refresh;document.querySelectorAll('.tab').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));document.querySelectorAll('[id^="tab-"]').forEach(x=>x.classList.add('hidden'));button.classList.add('active');$('tab-'+button.dataset.tab).classList.remove('hidden')});
 refresh();setInterval(refresh,10000);
 </script></body></html>'''
+
+# ================= 🔥 External Code Generator UI (Uses Global Password) =================
+CODE_PAGE = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Global Code Generator</title>
+<style>
+:root{color-scheme:dark;--bg:#080b14;--panel:#111827;--panel2:#0d1424;--line:#263247;--text:#eef2ff;--muted:#9aa8bf;--brand:#8b5cf6;--cyan:#06b6d4;--green:#34d399;--red:#fb7185;--yellow:#fbbf24}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 0,#1e1642,transparent 30%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}.shell{width:min(800px,100%);margin:auto;padding:24px}.topbar{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:24px}.brand{display:flex;align-items:center;gap:12px}.mark{width:44px;height:44px;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,var(--brand),var(--cyan));font-size:21px}h1{margin:0;font-size:24px}.logout{display:none}.card{background:linear-gradient(145deg,#141d31,#0e1525);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:0 12px 35px #0002}.form-group{margin-bottom:15px}label{display:block;margin-bottom:5px;font-weight:700;color:var(--muted)}input{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:#0b1120;color:#fff;outline:0;font:inherit;box-sizing:border-box}input:focus{border-color:var(--cyan);box-shadow:0 0 0 4px #06b6d422}.btn{display:inline-block;padding:11px 20px;border:0;border-radius:10px;background:linear-gradient(135deg,var(--brand),#6366f1);color:#fff;font-weight:700;cursor:pointer}.btn:hover{filter:brightness(1.1)}.output-box{background:#0b1120;padding:15px;border-radius:10px;border:1px solid var(--line);margin-top:10px;font-family:monospace;overflow-x:auto;white-space:pre-wrap;word-break:break-all}.error{color:var(--red)}.success{color:var(--green)}.empty{text-align:center;color:var(--muted);padding:25px}.note{color:var(--muted);font-size:13px;margin-bottom:15px}
+</style>
+</head>
+<body><main class="shell">
+<header class="topbar"><div class="brand"><div class="mark">🔐</div><div><h1>Code Generator</h1><div class="sub">Protected by Global Client Password</div></div></div></header>
+<section class="card"><h2>Challenge‑Response Signature</h2>
+<p class="note">Enter the same global password used by the ADB Commander client software to generate a signature.</p>
+<form method="post" autocomplete="off">
+<div class="form-group"><label for="global_password">Global Password</label><input type="password" id="global_password" name="global_password" value="{{ global_password }}" placeholder="Enter the global password" required></div>
+<div class="form-group"><label for="challenge">Challenge</label><input type="text" id="challenge" name="challenge" value="{{ challenge }}" placeholder="e.g. a1b2c3d4e5f6g7h8" pattern="[a-z0-9]{16}" title="16 lowercase alphanumeric characters" required></div>
+<button class="btn" type="submit">Generate Signature</button>
+</form>
+{% if error %}
+<div class="output-box error">{{ error }}</div>
+{% elif output %}
+<div class="output-box success">{{ output }}</div>
+{% endif %}
+</section></main></body>
+</html>'''
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
