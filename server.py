@@ -274,8 +274,8 @@ def admin_set_password():
     try:
         data = request.get_json()
         new_password = data.get('new_password')
-        if not new_password or len(new_password) < 8:
-            return jsonify({"error": "Password must be at least 8 characters"}), 400
+        if not new_password or len(new_password) < 3:
+            return jsonify({"error": "Password must be at least 3 characters"}), 400
         
         now = datetime.now(timezone.utc).isoformat()
         new_hash = hash_password(new_password)
