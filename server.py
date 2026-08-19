@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FINAL VERSION: Enhanced dashboard, all APIs fixed, no auto-logout.
+FINAL VERSION: Enhanced dashboard, all APIs fixed, history tab added.
 """
 import secrets
 import os
@@ -9,27 +9,29 @@ import sqlite3
 import socket
 import threading
 import time
+import logging
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = "FIXED_ADMIN_SECRET_KEY_1234567890_AND_NOT_CHANGE"
 app.permanent_session_lifetime = timedelta(days=7)
 CORS(app)
 
-# ================= অ্যাডমিন পাসওয়ার্ড (১০০% ফিক্সড) =================
 ADMIN_PASSWORD = "admin123"
 
-# ================= হ্যাশ ফাংশন =================
 def hash_password(pwd: str) -> str:
     return generate_password_hash(pwd)
 
 def verify_password(input_pwd: str, stored_hash: str) -> bool:
     return check_password_hash(stored_hash, input_pwd)
 
-# ================= ডেটাবেস সেটআপ =================
 def init_db():
     conn = sqlite3.connect('licenses.db', timeout=20)
     c = conn.cursor()
@@ -67,10 +69,10 @@ def init_db():
         c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (hash_password(ADMIN_PASSWORD),))
     conn.commit()
     conn.close()
+    logger.info("Database initialized with default password admin123")
 
 init_db()
 
-# ================= অফলাইন ডিটেক্টর =================
 def mark_offline_users():
     while True:
         time.sleep(10)
@@ -81,8 +83,8 @@ def mark_offline_users():
             c.execute("UPDATE users SET is_active = 0, deactivated_at = ? WHERE is_active = 1 AND last_seen < ?", (datetime.now(timezone.utc).isoformat(), cutoff))
             conn.commit()
             conn.close()
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Offline monitor error: {e}")
 
 threading.Thread(target=mark_offline_users, daemon=True).start()
 
@@ -92,7 +94,8 @@ def client_verify():
     conn = None
     try:
         data = request.get_json()
-        if not data: return jsonify({"success": False, "message": "Invalid Request"}), 400
+        if not data:
+            return jsonify({"success": False, "message": "Invalid Request"}), 400
 
         pc_name = data.get('pc_name', '').strip()
         hardware_id = data.get('hardware_id', '').strip()
@@ -124,8 +127,10 @@ def client_verify():
         c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", 
                   (user_id, "ACTIVATE", f"New Instance: {pc_name}", now))
         conn.commit()
+        logger.info(f"New user activated: {pc_name} (ID: {user_id})")
         return jsonify({"success": True, "message": "New instance activated", "session_token": token})
     except Exception as e:
+        logger.error(f"Verify error: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
         if conn: conn.close()
@@ -150,6 +155,7 @@ def client_status():
         conn.commit()
         return jsonify({"active": bool(result[0])}), 200
     except Exception as e:
+        logger.error(f"Status error: {e}")
         return jsonify({"active": False, "message": str(e)}), 500
     finally:
         if conn: conn.close()
@@ -178,8 +184,10 @@ def client_device_info():
             c.execute("INSERT INTO device_reports (user_id, serial, state, device_model, reported_at) VALUES (?, ?, ?, ?, ?)",
                       (user_id, dev.get("serial", "Unknown"), dev.get("state", "Unknown"), dev.get("model", "Unknown"), now))
         conn.commit()
+        logger.info(f"Device info updated for user {user_id}: {len(devices)} devices")
         return jsonify({"success": True, "message": "Devices info updated"}), 200
     except Exception as e:
+        logger.error(f"Device info error: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         if conn: conn.close()
@@ -218,8 +226,10 @@ def admin_deactivate():
         c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", 
                   (user_id, "DEACTIVATE", f"Admin deactivated instance {user_id}", now))
         conn.commit()
+        logger.info(f"User {user_id} deactivated by admin")
         return jsonify({"success": True, "message": "Instance deactivated successfully"}), 200
     except Exception as e:
+        logger.error(f"Deactivate error: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
@@ -243,8 +253,10 @@ def admin_set_password():
         c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", 
                   (None, "GLOBAL_PASSWORD_CHANGE", f"Global password changed by admin", now))
         conn.commit()
+        logger.info("Global password changed by admin")
         return jsonify({"success": True, "message": "Global password updated successfully."}), 200
     except Exception as e:
+        logger.error(f"Set password error: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
@@ -270,7 +282,6 @@ def admin_get_history():
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
 
-# ================= অ্যাডমিন লগইন =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -295,14 +306,14 @@ def index():
         return redirect(url_for('login'))
     return render_template_string(DASHBOARD_HTML)
 
-# ================= UI HTML =================
+# ================= UI HTML (দুই ট্যাব: ইউজার ও হিস্ট্রি) =================
 LOGIN_PAGE = '''<!DOCTYPE html><html><head><title>Admin Login</title><style>body{background:#111827;color:#f9fafb;display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;margin:0}.box{background:#1f2937;padding:40px;border-radius:12px;width:300px;text-align:center}h2{color:#64ffda}input{width:100%;padding:12px;margin:10px 0;background:#111827;border:1px solid #374151;border-radius:6px;color:#fff}button{width:100%;padding:12px;background:#22c55e;border:none;border-radius:6px;color:#fff;font-weight:bold;cursor:pointer}.error{color:#fca5a5;margin-top:10px}</style></head><body><div class="box"><h2>🔐 Admin Panel</h2><form method="post"><input type="password" name="password" placeholder="Enter Password" required><button type="submit">Login</button></form>{% if error %}<div class="error">{{ error }}</div>{% endif %}</div></body></html>'''
 
-DASHBOARD_HTML = '''<!DOCTYPE html><html><head><title>Admin Panel</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111827;color:#f9fafb;padding:20px;font-family:sans-serif}.container{max-width:1200px;margin:0 auto;background:#1f2937;padding:30px;border-radius:12px}.header{text-align:center;margin-bottom:30px}.header h1{font-size:28px;color:#fff}.header h1 span{color:#64ffda}.card{background:#111827;padding:20px;margin-bottom:20px;border:1px solid #374151;border-radius:8px}.card h3{color:#64ffda;margin-bottom:15px}.input-group{display:flex;gap:10px}input{padding:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;flex:1}.btn{padding:10px 20px;background:#22c55e;border:none;border-radius:6px;color:#fff;cursor:pointer}.btn-danger{background:#ef4444}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{padding:12px;border:1px solid #374151;text-align:left}th{background:#111827;color:#64ffda}.active{color:#22c55e}.inactive{color:#ef4444}.logout{float:right;color:#fca5a5;text-decoration:none}</style></head><body><div class="container"><div class="header"><h1>🔐 <span>Admin Panel</span></h1><a href="/logout" class="logout">Logout</a></div><div class="card"><h3>🔑 Change Global Password</h3><div class="input-group"><input type="password" id="newPwd" placeholder="Enter new global password"><button class="btn" onclick="updatePassword()">Update Password</button></div><div id="msg" style="margin-top:10px;font-size:14px"></div></div><div class="card"><h3>👥 Connected Users</h3><table><thead><tr><th>ID</th><th>PC Name</th><th>Location</th><th>Device Model</th><th>Status</th><th>Activated At</th><th>Deactivated At</th><th>Action</th></tr></thead><tbody id="users-body"></tbody></table></div></div><script>let loggedOut = false;async function fetchUsers(){if(loggedOut)return;try{const r=await fetch('/api/admin/users');if(!r.ok){if(r.status===401||r.status===403){loggedOut=true;location.href='/login';return;}console.error('Server error',r.status);return;}const data=await r.json();const tbody=document.getElementById('users-body');tbody.innerHTML='';if(data.users.length===0){tbody.innerHTML='<tr><td colspan="8" class="text-center">No users.</td></tr>';return;}data.users.forEach(u=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${u.id}</td><td>${u.pc_name}</td><td>${u.location||'-'}</td><td>${u.device_model||'-'}</td><td><span class="${u.is_active?'active':'inactive'}">${u.is_active?'✅ Active':'❌ Inactive'}</span></td><td>${u.activated_at||'-'}</td><td>${u.deactivated_at||'-'}</td><td>${u.is_active?`<button class="btn btn-danger" onclick="deactivate(${u.id})">Deactivate</button>`:'Deactivated'}</td>`;tbody.appendChild(tr);});}catch(e){console.error('Fetch error',e);}}async function deactivate(id){if(!confirm('Deactivate this instance?'))return;const r=await fetch('/api/admin/deactivate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id})});if(r.ok){fetchUsers();}}async function updatePassword(){const pwd=document.getElementById('newPwd').value.trim();if(!pwd||pwd.length<4){document.getElementById('msg').innerHTML='<span style="color:red">Min 4 characters!</span>';return;}const r=await fetch('/api/admin/set_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pwd})});const data=await r.json();if(r.ok){document.getElementById('msg').innerHTML='<span style="color:#86efac;">✅ '+data.message+'</span>';document.getElementById('newPwd').value='';}else{document.getElementById('msg').innerHTML='<span style="color:#fca5a5;">❌ '+data.error+'</span>';}}fetchUsers();setInterval(fetchUsers,5000);</script></body></html>'''
+DASHBOARD_HTML = '''<!DOCTYPE html><html><head><title>Admin Panel</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111827;color:#f9fafb;padding:20px;font-family:sans-serif}.container{max-width:1200px;margin:0 auto;background:#1f2937;padding:30px;border-radius:12px}.header{text-align:center;margin-bottom:30px}.header h1{font-size:28px;color:#fff}.header h1 span{color:#64ffda}.card{background:#111827;padding:20px;margin-bottom:20px;border:1px solid #374151;border-radius:8px}.card h3{color:#64ffda;margin-bottom:15px}.input-group{display:flex;gap:10px}input{padding:10px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#fff;flex:1}.btn{padding:10px 20px;background:#22c55e;border:none;border-radius:6px;color:#fff;cursor:pointer}.btn-danger{background:#ef4444}.tabs{display:flex;gap:10px;margin-bottom:20px}.tab-btn{background:#374151;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer}.tab-btn.active{background:#64ffda;color:#111827}.hidden{display:none}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{padding:12px;border:1px solid #374151;text-align:left}th{background:#111827;color:#64ffda}.active{color:#22c55e}.inactive{color:#ef4444}.logout{float:right;color:#fca5a5;text-decoration:none}.refresh-btn{background:#1e3a8a;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer}</style></head><body><div class="container"><div class="header"><h1>🔐 <span>Admin Panel</span></h1><a href="/logout" class="logout">Logout</a></div><div class="card"><h3>🔑 Change Global Password</h3><div class="input-group"><input type="password" id="newPwd" placeholder="Enter new global password"><button class="btn" onclick="updatePassword()">Update Password</button></div><div id="msg" style="margin-top:10px;font-size:14px"></div></div><div class="tabs"><button class="tab-btn active" onclick="switchTab('users')">👤 Users</button><button class="tab-btn" onclick="switchTab('history')">📜 History</button></div><div id="tab-users"><div class="card"><h3>👥 Connected Users <button class="refresh-btn" onclick="fetchUsers()">↻ Refresh</button></h3><table><thead><tr><th>ID</th><th>PC Name</th><th>Location</th><th>Device Model</th><th>Status</th><th>Activated At</th><th>Deactivated At</th><th>Action</th></tr></thead><tbody id="users-body"></tbody></table></div></div><div id="tab-history" class="hidden"><div class="card"><h3>📜 History <button class="refresh-btn" onclick="fetchHistory()">↻ Refresh</button></h3><table><thead><tr><th>ID</th><th>PC Name</th><th>Action</th><th>Details</th><th>Timestamp</th></tr></thead><tbody id="history-body"></tbody></table></div></div></div><script>let loggedOut=false;async function fetchUsers(){if(loggedOut)return;try{const r=await fetch('/api/admin/users');if(!r.ok){if(r.status===401||r.status===403){loggedOut=true;location.href='/login';return;}console.error('Server error',r.status);return;}const data=await r.json();const tbody=document.getElementById('users-body');tbody.innerHTML='';if(data.users.length===0){tbody.innerHTML='<tr><td colspan="8" class="text-center">No users. Please run the client software first.</td></tr>';return;}data.users.forEach(u=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${u.id}</td><td>${u.pc_name}</td><td>${u.location||'-'}</td><td>${u.device_model||'-'}</td><td><span class="${u.is_active?'active':'inactive'}">${u.is_active?'✅ Active':'❌ Inactive'}</span></td><td>${u.activated_at||'-'}</td><td>${u.deactivated_at||'-'}</td><td>${u.is_active?`<button class="btn btn-danger" onclick="deactivate(${u.id})">Deactivate</button>`:'Deactivated'}</td>`;tbody.appendChild(tr);});}catch(e){console.error('Fetch error',e);}}async function deactivate(id){if(!confirm('Deactivate this instance?'))return;const r=await fetch('/api/admin/deactivate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id})});if(r.ok){fetchUsers();fetchHistory();}}async function updatePassword(){const pwd=document.getElementById('newPwd').value.trim();if(!pwd||pwd.length<4){document.getElementById('msg').innerHTML='<span style="color:red">Min 4 characters!</span>';return;}const r=await fetch('/api/admin/set_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pwd})});const data=await r.json();if(r.ok){document.getElementById('msg').innerHTML='<span style="color:#86efac;">✅ '+data.message+'</span>';document.getElementById('newPwd').value='';}else{document.getElementById('msg').innerHTML='<span style="color:#fca5a5;">❌ '+data.error+'</span>';}}async function fetchHistory(){if(loggedOut)return;try{const r=await fetch('/api/admin/history');if(!r.ok){if(r.status===401||r.status===403){loggedOut=true;location.href='/login';return;}console.error('Server error',r.status);return;}const data=await r.json();const tbody=document.getElementById('history-body');tbody.innerHTML='';if(data.history.length===0){tbody.innerHTML='<tr><td colspan="5" class="text-center">No history yet.</td></tr>';return;}data.history.forEach(h=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${h.id}</td><td>${h.pc_name}</td><td>${h.action}</td><td>${h.details||'-'}</td><td>${h.timestamp}</td>`;tbody.appendChild(tr);});}catch(e){console.error('Fetch error',e);}}function switchTab(tab){document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('.hidden').forEach(e=>e.classList.add('hidden'));document.getElementById('tab-'+tab).classList.remove('hidden');event.target.classList.add('active');}fetchUsers();fetchHistory();setInterval(()=>{fetchUsers();fetchHistory();},10000);</script></body></html>'''
 
 if __name__ == '__main__':
     print("\n" + "=" * 70)
-    print("  🔐 ADMIN PANEL - FINAL FIX")
+    print("  🔐 ADMIN PANEL - FINAL VERSION WITH HISTORY TAB")
     print("  Admin password: admin123 (fixed, never changes)")
     print("  Client password: changeable from dashboard")
     print("=" * 70)
