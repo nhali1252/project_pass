@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-FINAL FIXED VERSION: Bypass removed, Key mismatch fixed, Secure hashing added.
+FINAL 100% FIXED VERSION: Bypass removed, Key mismatch fixed, Secure hashing added.
+Route syntax fixed for `/api/admin/history`.
 """
 import secrets
 import os
@@ -251,7 +252,7 @@ def admin_set_password():
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (new_hash,))
         
-        # 🔥 সব সেশন রিভোক করা হচ্ছে
+        # 🔥 সব সেশন রিভোক করা হচ্ছে (পাসওয়ার্ড পরিবর্তন করলে পুরোনো সেশন বাতিল)
         c.execute("""
             UPDATE users SET session_token = NULL, last_seen = NULL, 
             is_active = 0, deactivated_at = ? WHERE is_active = 1
@@ -266,7 +267,7 @@ def admin_set_password():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/admin/history', ['GET'])
+@app.route('/api/admin/history', methods=['GET'])  # 🔥 FIXED: methods=['GET'] যুক্ত করা হয়েছে
 def admin_get_history():
     if not session.get('dashboard_logged_in'):
         return jsonify({"error": "Unauthorized"}), 401
@@ -329,6 +330,6 @@ DASHBOARD_HTML = '''<!DOCTYPE html><html><head><title>Admin Panel</title><meta n
 
 if __name__ == '__main__':
     print("\n" + "=" * 70)
-    print("  🔐 ADMIN PANEL - FIXED VERSION (No default client password)")
+    print("  🔐 ADMIN PANEL - FINAL FIXED VERSION")
     print("=" * 70)
     app.run(host='0.0.0.0', port=5000, debug=False)
