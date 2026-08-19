@@ -142,9 +142,11 @@ def client_verify():
         now = datetime.now(timezone.utc).isoformat()
         token = secrets.token_urlsafe(32)
         last_seen = now
+        client_ip = request.remote_addr  # 🔥 ক্লায়েন্টের আইপি অ্যাড্রেস ক্যাপচার করা
 
-        c.execute("INSERT INTO users (pc_name, hardware_id, is_active, activated_at, session_token, last_seen) VALUES (?, ?, 1, ?, ?, ?)", 
-                  (pc_name, hardware_id, now, token, last_seen))
+        # 🔥 লোকেশন (IP) যুক্ত করা হয়েছে
+        c.execute("INSERT INTO users (pc_name, hardware_id, location, is_active, activated_at, session_token, last_seen) VALUES (?, ?, ?, 1, ?, ?, ?)", 
+                  (pc_name, hardware_id, client_ip, now, token, last_seen))
         user_id = c.lastrowid
         
         c.execute("INSERT INTO user_history (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)", 
