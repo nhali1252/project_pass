@@ -30,12 +30,10 @@ app.config.update(
 )
 CORS(app)
 
-# ================= Admin Password (change this for production) =================
-# For security, it's recommended to set ADMIN_PASSWORD_HASH via environment variable.
-# If not set, we fall back to a default hash for "admin123" and log a warning.
+# ================= Admin Password (fallback to admin123) =================
 ADMIN_PASSWORD_HASH = os.environ.get('ADMIN_PASSWORD_HASH')
 if not ADMIN_PASSWORD_HASH:
-    logger.warning("⚠️ ADMIN_PASSWORD_HASH not set. Using default password 'admin123'. Please set it via environment.")
+    logger.warning("⚠️ ADMIN_PASSWORD_HASH not set. Using default password 'admin123'.")
     ADMIN_PASSWORD_HASH = generate_password_hash("admin123")
 
 # ================= Helper Functions =================
@@ -78,7 +76,6 @@ def init_db():
         timestamp TEXT NOT NULL,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
     )''')
-    # Set default client password if not exists (optional)
     c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
     if not c.fetchone():
         c.execute("INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)", (hash_password("admin123"),))
@@ -326,7 +323,7 @@ def index():
         return redirect(url_for('login'))
     return render_template_string(DASHBOARD_HTML)
 
-# ================= UI Templates (Modern versions) =================
+# ================= UI Templates =================
 LOGIN_PAGE = r'''<!doctype html>
 <html lang="en">
 <head>
