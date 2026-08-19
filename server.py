@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 ADB Commander - Master Control Panel
-Fixed Admin Login: Environment variable check enforced, check_password_hash used correctly.
-Dashboard auto-refresh set to 10 seconds.
+Fully compatible with adb_commander_client_fixed.py
 """
 import secrets
 import os
@@ -22,17 +21,16 @@ logger = logging.getLogger(__name__)
 
 # ================= Flask App =================
 app = Flask(__name__)
-
 app.config.update(
     SECRET_KEY=os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32)),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=True,  # HTTPS (api.alii.uk) এর জন্য True
+    SESSION_COOKIE_SECURE=True,          # True because api.alii.uk uses HTTPS
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
 )
 CORS(app)
 
-# 🔥 এনভায়রনমেন্ট ভেরিয়েবল থেকে হ্যাশ নেওয়া। যদি না থাকে, সার্ভার স্টার্ট হবে না।
+# ================= Admin password (set via environment) =================
 ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH")
 if not ADMIN_PASSWORD_HASH:
     raise RuntimeError(
@@ -304,14 +302,12 @@ def admin_get_history():
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now(timezone.utc).isoformat(), 'server': socket.gethostname()})
 
-# ================= ✅ ফিক্স করা লগইন রুট =================
+# ================= Admin Login & Dashboard =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
-
     if request.method == "POST":
         entered_password = request.form.get("password", "")
-
         if not entered_password:
             error = "Please enter your password."
         elif check_password_hash(ADMIN_PASSWORD_HASH, entered_password):
@@ -321,7 +317,6 @@ def login():
             return redirect(url_for("index"))
         else:
             error = "Invalid password."
-
     return render_template_string(LOGIN_PAGE, error=error)
 
 @app.route('/logout')
@@ -380,7 +375,7 @@ async function refresh(){if(busy)return;busy=true;try{await Promise.all([fetchUs
 async function deactivate(id){if(!window.confirm('Deactivate this device?'))return;try{await api('/api/admin/deactivate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:id})});await refresh()}catch(e){$('msg').textContent=e.message}}
 $('passwordBtn').onclick=async()=>{const pwd=$('newPwd').value;if(pwd.length<8){$('msg').textContent='Use at least 8 characters.';return}try{const d=await api('/api/admin/set_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pwd})});$('msg').textContent=d.message||'Password updated.';$('newPwd').value=''}catch(e){$('msg').textContent=e.message}}
 $('refreshBtn').onclick=refresh;document.querySelectorAll('.tab').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));document.querySelectorAll('[id^="tab-"]').forEach(x=>x.classList.add('hidden'));button.classList.add('active');$('tab-'+button.dataset.tab).classList.remove('hidden')});
-refresh();setInterval(refresh,10000); // 🔥 রিফ্রেশের সময় ১০ সেকেন্ড করা হয়েছে
+refresh();setInterval(refresh,10000);
 </script></body></html>'''
 
 if __name__ == '__main__':
