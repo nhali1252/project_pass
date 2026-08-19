@@ -142,9 +142,16 @@ def client_verify():
         now = datetime.now(timezone.utc).isoformat()
         token = secrets.token_urlsafe(32)
         last_seen = now
-        client_ip = request.remote_addr  # 🔥 ক্লায়েন্টের আইপি অ্যাড্রেস ক্যাপচার করা
 
-        # 🔥 লোকেশন (IP) যুক্ত করা হয়েছে
+        # 🔥 আসল আইপি ঠিক করার জন্য হেডার চেক করা হচ্ছে
+        client_ip = request.headers.get('CF-Connecting-IP') or request.headers.get('X-Forwarded-For')
+        if client_ip:
+            # যদি একাধিক আইপি থাকে (কমা দিয়ে সেপারেটেড), প্রথমটি নেওয়া হয়
+            client_ip = client_ip.split(',')[0].strip()
+        else:
+            # হেডার না পাওয়া গেলে লোকালহোস্ট রিটার্ন
+            client_ip = request.remote_addr
+
         c.execute("INSERT INTO users (pc_name, hardware_id, location, is_active, activated_at, session_token, last_seen) VALUES (?, ?, ?, 1, ?, ?, ?)", 
                   (pc_name, hardware_id, client_ip, now, token, last_seen))
         user_id = c.lastrowid
@@ -216,7 +223,7 @@ def client_device_info():
         return jsonify({"error": str(e)}), 500
     finally:
         if conn: conn.close()
-
+            
 # ================= Admin API =================
 @app.route('/api/admin/users', methods=['GET'])
 def admin_get_users():
