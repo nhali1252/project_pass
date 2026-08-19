@@ -2,10 +2,10 @@
 """
 ADB Commander - Master Control Panel
 FINAL FIXED VERSION:
-- Admin password is hardcoded as 'admin123' (not stored in DB)
-- Client software password is stored in DB as 'global_password_hash' and changeable from dashboard
-- Session secret key is fixed to avoid logout on restart
-- Permanent session with 7-day lifetime
+- Fixed Admin Login (.strip() added to password input)
+- Fixed permanent session with a fixed secret key
+- Admin pass: admin123
+- Client pass: changeable from dashboard (stored in DB)
 """
 import secrets
 import os
@@ -19,15 +19,16 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "REPLACE_THIS_WITH_A_FIXED_SECRET_STRING_AT_LEAST_32_CHARS"  # আপনি এখানে আপনার পছন্দের একটি ফিক্সড সিক্রেট দিতে পারেন
-app.permanent_session_lifetime = timedelta(days=7)  # সেশন ৭ দিন পর্যন্ত সক্রিয় থাকবে
+# 🔥 সেশন স্থিতিশীল রাখার জন্য একটি ফিক্সড সিক্রেট কী ব্যবহার করা হচ্ছে।
+# আপনি চাইলে এটি পরিবর্তন করতে পারেন, তবে পরিবর্তন করলে বর্তমান লগইন সেশন লগআউট হয়ে যাবে।
+app.secret_key = "THIS_IS_A_FIXED_32_CHAR_SECRET_FOR_ADMIN_SESSION_123"
+app.permanent_session_lifetime = timedelta(days=7)
 CORS(app)
 
 # ================= কনফিগারেশন =================
-# অ্যাডমিন প্যানেল লগইনের জন্য ফিক্সড পাসওয়ার্ড (ডাটাবেসে সেভ হবে না)
 ADMIN_PASSWORD = "admin123"
 
-# ================= হ্যাশ ফাংশন (Werkzeug) =================
+# ================= হ্যাশ ফাংশন =================
 def hash_password(pwd: str) -> str:
     return generate_password_hash(pwd)
 
@@ -67,8 +68,6 @@ def init_db():
         timestamp TEXT NOT NULL,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
     )''')
-
-    # ক্লায়েন্ট পাসওয়ার্ড (software) - init_db() তে সেট করা নেই, শুধু টেবিল তৈরি।
     conn.commit()
     conn.close()
 
@@ -109,7 +108,6 @@ def client_verify():
         c.execute("SELECT value FROM settings WHERE key = 'global_password_hash'")
         result = c.fetchone()
         
-        # 🔥 যদি ক্লায়েন্ট পাসওয়ার্ড এখনও সেট না করা থাকে
         if not result:
             conn.close()
             return jsonify({"success": False, "message": "Global password not configured. Please set it in the Admin Panel."}), 401
@@ -244,13 +242,11 @@ def admin_set_password():
         conn = sqlite3.connect('licenses.db')
         c = conn.cursor()
         
-        # 🔥 ক্লায়েন্ট পাসওয়ার্ড আপডেট করা (upsert)
         c.execute("""
             INSERT INTO settings (key, value) VALUES ('global_password_hash', ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (new_hash,))
         
-        # 🔥 সব সেশন রিভোক করা
         c.execute("""
             UPDATE users SET session_token = NULL, last_seen = NULL, 
             is_active = 0, deactivated_at = ? WHERE is_active = 1
@@ -291,12 +287,11 @@ def health_check():
         'server': socket.gethostname()
     })
 
-# ================= ড্যাশবোর্ড লগইন ও UI =================
+# ================= ✅ ফিক্স করা ড্যাশবোর্ড লগইন (পাসওয়ার্ডে .strip() যুক্ত) =================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        password = request.form.get('password')
-        # ✅ অ্যাডমিন পাসওয়ার্ড ফিক্সড `admin123` এর সাথে যাচাই করা হচ্ছে
+        password = request.form.get('password', '').strip()  # 🔥 এখানে .strip() যুক্ত করা হয়েছে
         if password == ADMIN_PASSWORD:
             session.permanent = True
             session['dashboard_logged_in'] = True
